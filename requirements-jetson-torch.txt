@@ -1,0 +1,11 @@
+# ⚠️  本文件不是 pip requirements！不要用 pip install -r 安装。
+#
+# Jetson PyTorch wheel 清单已移至:
+#   jetson-torch-wheels.manifest
+#
+# 正确安装方式（在 Jetson 上）:
+#   bash tb6r5_policy_infer/scripts/install_jetson_torch.sh
+#
+# 若 TER30 无法访问 nvidia.box.com，请在能联网的电脑上
+# 从论坛帖下载 3 个 .whl，scp 到 Jetson 后:
+#   bash tb6r5_policy_infer/scripts/install_jetson_torch.sh --offline --cache-dir /path/to/wheels

@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tb6r5_policy_infer"
+version = "0.1.0"
+description = "LeRobot ACT policy inference and offline evaluation for TB6-R5"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "lerobot==0.5.1",
+    "transformers>=5.3.0,<6.0.0",
+    "huggingface-hub>=1.16.0,<2.0.0",
+    "num2words",
+    "tokenizers",
+    "numpy",
+    "opencv-python",
+    "matplotlib",
+]
+
+[project.optional-dependencies]
+hardware = ["pyrealsense2"]
+
+# torch 不在 dependencies 中：x86 用 pip install torch；Jetson 须装 NVIDIA 预编译 wheel（见 README）。
+# transformers / huggingface-hub 须与 lerobot 0.5.x 配套（见 README）：
+#   transformers>=5.3, huggingface-hub>=1.16,<2
+#
+# 真机推理：厂商 SDK 已内置在 tb6r5_policy_infer/vendor/（pip install 即可）。
+# RealSense 模式：pip install -e "./tb6r5_policy_infer[hardware]"
+# 离线评估（tb6r5-policy-eval）不需要 hardware 可选依赖。
+
+[project.urls]
+Homepage = "https://github.com/XR-Robotics/XRoboToolkit-Teleop-Sample-Python"
+
+[project.scripts]
+tb6r5-policy-infer = "tb6r5_policy_infer.cli:cli"
+tb6r5-policy-eval = "tb6r5_policy_infer.eval_cli:cli"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["tb6r5_policy_infer*"]
+
+[tool.setuptools.package-data]
+tb6r5_policy_infer = ["vendor/**/*", "vendor_py312/**/*"]
