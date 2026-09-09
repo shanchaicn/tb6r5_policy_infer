@@ -118,7 +118,11 @@ def apply_policy_hardware_defaults(policy, args) -> None:
         # Keep arm RPC aligned to control fps by default.
         args.arm_rpc_rate_hz = min(defaults.arm_rpc_rate_hz, args.fps)
     if getattr(args, "gripper_rpc_rate_hz", None) is None:
-        args.gripper_rpc_rate_hz = defaults.gripper_rpc_rate_hz
+        # g_model=3 (JogAnyJ gripper): continuous control at arm rate.
+        if getattr(args, "g_model", 2) == 3:
+            args.gripper_rpc_rate_hz = float(args.arm_rpc_rate_hz)
+        else:
+            args.gripper_rpc_rate_hz = defaults.gripper_rpc_rate_hz
 
 
 def print_policy_deploy_summary(policy, args) -> None:
@@ -146,7 +150,7 @@ def print_policy_deploy_summary(policy, args) -> None:
         print(f"{BOLD_GREEN}[POLICY] {' '.join(shape_bits)}{RESET}")
     print(
         f"{BOLD_GREEN}[POLICY] deploy: fps={args.fps:g} arm_rpc={args.arm_rpc_rate_hz:g}Hz "
-        f"gripper_rpc={args.gripper_rpc_rate_hz:g}Hz{RESET}"
+        f"gripper_rpc={args.gripper_rpc_rate_hz:g}Hz g_model={getattr(args, 'g_model', 2)}{RESET}"
     )
     if ptype in LANGUAGE_TASK_POLICIES:
         print(f'{BOLD_GREEN}[POLICY] task="{args.task}"{RESET}')

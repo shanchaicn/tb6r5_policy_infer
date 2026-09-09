@@ -148,6 +148,25 @@ def gripper_edge_min_steps(fps: float, min_interval_s: float) -> int:
     return max(1, int(round(fps * min_interval_s)))
 
 
+def resolve_gripper_cmd_delta(
+    *,
+    on_gripper_rpc_tick: bool,
+    threshold_enabled: bool,
+    cmd_delta: float,
+    allow_send: bool = True,
+) -> float:
+    """Resolve cmd_delta for a control step.
+
+    Default (threshold off): 0 on gripper RPC ticks → send every tick.
+    Threshold on: use ``cmd_delta`` mm gating (legacy behavior).
+    """
+    if not on_gripper_rpc_tick or not allow_send:
+        return float("inf")
+    if threshold_enabled:
+        return cmd_delta
+    return 0.0
+
+
 def should_send_gripper_mm(
     gripper_distance: float,
     last_sent_mm: float | None,
@@ -239,6 +258,7 @@ def print_gripper_config(
     control_fps: float | None = None,
     gripper_close_mm: float | None = None,
     gripper_open_mm: float | None = None,
+    gripper_threshold: bool = False,
     log_prefix: str = "POLICY",
 ) -> None:
     mode = (
@@ -246,10 +266,12 @@ def print_gripper_config(
         if gripper_continuous
         else "legacy hysteresis (arm SubLoop1 JogAnyJ + binary gripper)"
     )
+    threshold_label = f"threshold={'on' if gripper_threshold else 'off'}"
     print(
         f"{RED}[{log_prefix}][GRIPPER] 配置: min_dist={gripper_min_distance:.1f}mm "
         f"max_dist={gripper_max_distance:.1f}mm "
-        f"interval={gripper_interval:.1f} cmd_delta={gripper_cmd_delta:.2f}mm mode={mode}{RESET}"
+        f"interval={gripper_interval:.1f} cmd_delta={gripper_cmd_delta:.2f}mm "
+        f"{threshold_label} mode={mode}{RESET}"
     )
     if arm_rpc_rate_hz is not None and gripper_rpc_rate_hz is not None and control_fps is not None:
         arm_stride, grip_stride = rpc_strides(control_fps, arm_rpc_rate_hz, gripper_rpc_rate_hz)

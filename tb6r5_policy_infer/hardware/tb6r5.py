@@ -30,11 +30,31 @@ DEFAULT_GRIPPER_MIN_D = 0.0
 DEFAULT_TWO_FINGERS_GRIPPER_INTERVAL = 25.0
 DEFAULT_GRIPPER_CMD_DELTA_MM = 0.5
 DEFAULT_JOG_ASYNC_TIMEOUT_MS = 5_000_000
-DEFAULT_SUBLOOP1_EXEC_TIMEOUT_MS = 5000
+DEFAULT_SUBLOOP1_EXEC_TIMEOUT_MS = 6_000_000
 DEFAULT_SUBLOOP1_EXIT_TIMEOUT_MS = 120_000
 DEFAULT_JOG_ANY_J_LAST_COUNT = 500
 SUBLOOP1_CMD = "SubLoop1"
 NOT_RUN_EXECUTE = "NotRunExecute"
+
+# JogAnyJ RPC dialect (controller / Codeit version).
+# 44: include --zone_ratio and --clear_buffer (current).
+# 45: omit --zone_ratio and --clear_buffer.
+DEFAULT_CD_VERSION = 44
+CD_VERSIONS = (44, 45)
+
+# g_model: 2=MoveTwoFingersGripper (legacy), 3=JogAnyJ j1 meters (new gripper)
+DEFAULT_G_MODEL = 2
+# subloop: 1=SubLoop1 --exec nesting (default); 0=direct {arm||grip}, no SubLoop1 exit
+DEFAULT_SUBLOOP = 1
+SUBLOOP_MODES = (0, 1)
+# New gripper (g_model=3): j1 0.000–0.080 m ↔ 0–80mm (collection range).
+GRIPPER_JOG_MM_FULL_SCALE = 80.0
+GRIPPER_JOG_JOINT_MIN = 0.0
+GRIPPER_JOG_JOINT_MAX = 0.080
+GRIPPER_JOG_JOINT_VEL = 0.5
+GRIPPER_JOG_JOINT_ACC = 0.5
+GRIPPER_JOG_JOINT_DEC = 0.5
+DEFAULT_GRIPPER_G3_MAX_D = 80.0
 
 
 def _platform_subdir() -> str:
@@ -138,6 +158,15 @@ class TB6R5Interface:
         joint_dec: float = DEFAULT_JOG_ANY_JOINT_DEC,
         subloop1_immediate: bool = False,
         print_rpc: bool = False,
+        g_model: int = DEFAULT_G_MODEL,
+        cd_version: int = DEFAULT_CD_VERSION,
+        subloop: int = DEFAULT_SUBLOOP,
+        gripper_jog_joint_vel: float = GRIPPER_JOG_JOINT_VEL,
+        gripper_jog_joint_acc: float = GRIPPER_JOG_JOINT_ACC,
+        gripper_jog_joint_dec: float = GRIPPER_JOG_JOINT_DEC,
+        gripper_jog_joint_min: float = GRIPPER_JOG_JOINT_MIN,
+        gripper_jog_joint_max: float = GRIPPER_JOG_JOINT_MAX,
+        gripper_jog_mm_full_scale: float = GRIPPER_JOG_MM_FULL_SCALE,
     ):
         self.ip = ip
         self.rpc_port = int(rpc_port)
@@ -150,6 +179,21 @@ class TB6R5Interface:
         self.joint_dec = max(float(joint_dec), 0.0)
         self.subloop1_immediate = bool(subloop1_immediate)
         self.print_rpc = bool(print_rpc)
+        self.g_model = int(g_model)
+        if self.g_model not in (2, 3):
+            raise ValueError(f"g_model must be 2 or 3, got {self.g_model}")
+        self.cd_version = int(cd_version)
+        if self.cd_version not in CD_VERSIONS:
+            raise ValueError(f"cd_version must be one of {CD_VERSIONS}, got {self.cd_version}")
+        self.subloop = int(subloop)
+        if self.subloop not in SUBLOOP_MODES:
+            raise ValueError(f"subloop must be one of {SUBLOOP_MODES}, got {self.subloop}")
+        self.gripper_jog_joint_vel = max(float(gripper_jog_joint_vel), 0.0)
+        self.gripper_jog_joint_acc = max(float(gripper_jog_joint_acc), 0.0)
+        self.gripper_jog_joint_dec = max(float(gripper_jog_joint_dec), 0.0)
+        self.gripper_jog_joint_min = float(gripper_jog_joint_min)
+        self.gripper_jog_joint_max = float(gripper_jog_joint_max)
+        self.gripper_jog_mm_full_scale = max(float(gripper_jog_mm_full_scale), 1e-6)
         self.jog_async_timeout_ms = DEFAULT_JOG_ASYNC_TIMEOUT_MS
 
         self._rpc: RpcSession | None = None
@@ -160,13 +204,23 @@ class TB6R5Interface:
         self._rpc_sync_lock = threading.Lock()
         self._state_lock = threading.Lock()
         self._joint_stream_count = 0
+        self._cartesian_stream_count = 0
+        self._gripper_stream_count = 0
         self._jog_async_pending = 0
         self._subloop1_stream_pending = 0
         self._subloop1_active = False
         self._subloop1_exiting = False
+        # Invalidate late first-exec callbacks after exit/abort (JogAnyJ uses a multi-minute
+        # async timeout; abort→exit leaves a stale ErrorInfo that must not poison Recover).
+        self._subloop1_session_gen = 0
         self._last_gripper_distance_sent: float | None = None
         self._gripper_cmd_delta_mm = DEFAULT_GRIPPER_CMD_DELTA_MM
         self._last_cmd_q: np.ndarray | None = None
+        self._last_cmd_xyz: np.ndarray | None = None
+        self._last_cmd_quat_wxyz: np.ndarray | None = None
+        self.cartesian_vel: float | None = None
+        self.cartesian_acc: float | None = None
+        self.cartesian_dec: float | None = None
 
     @property
     def is_connected(self) -> bool:
@@ -186,7 +240,15 @@ class TB6R5Interface:
                 raise ConnectionError(f"TB6-R5 RPC connection failed: {self._rpc.error_info()}")
 
             if self.enable_topic:
-                self._topic = TopicFeedback(self.ip, joint_count=self.joint_count, poll_hz=self.rpc_cmd_rate_hz)
+                self._topic = TopicFeedback(
+                    self.ip,
+                    joint_count=self.joint_count,
+                    poll_hz=self.rpc_cmd_rate_hz,
+                    g_model=self.g_model,
+                    gripper_jog_joint_min=self.gripper_jog_joint_min,
+                    gripper_jog_joint_max=self.gripper_jog_joint_max,
+                    gripper_jog_mm_full_scale=self.gripper_jog_mm_full_scale,
+                )
                 self._topic.start(wait_timeout_s=topic_wait_timeout_s)
 
             if not self._send_init_commands():
@@ -215,7 +277,34 @@ class TB6R5Interface:
         print("TB6-R5 disconnected.")
 
     def disable(self) -> None:
-        self._send_rpc_sync("{Disable}", timeout_ms=5000, log_kind="disable")
+        # Aborting SubLoop1 Jog mid-stream often leaves "server in error"; Clear first.
+        if self._server_in_error:
+            self.clear_and_recover(log_prefix="disable-prep")
+        if not self._send_rpc_sync("{Disable}", timeout_ms=5000, log_kind="disable"):
+            # One more attempt after Clear if Disable itself reported server_in_error.
+            self.clear_and_recover(log_prefix="disable-retry")
+            self._send_rpc_sync("{Disable}", timeout_ms=5000, log_kind="disable")
+
+    def clear_and_recover(self, *, log_prefix: str = "clear-recover") -> bool:
+        """Clear controller error + Recover so a fresh SubLoop1 / Disable can proceed."""
+        self._server_in_error = False
+        ok_clear = self._send_rpc_sync(
+            "{Clear}",
+            timeout_ms=5000,
+            sleep_s=0.05,
+            ignore_subcmd_errors=True,
+            log_kind=f"{log_prefix} Clear",
+        )
+        self._server_in_error = False
+        ok_rec = self._send_rpc_sync(
+            "{Recover}",
+            timeout_ms=5000,
+            sleep_s=0.1,
+            ignore_subcmd_errors=True,
+            log_kind=f"{log_prefix} Recover",
+        )
+        self._server_in_error = False
+        return bool(ok_clear and ok_rec)
 
     def get_joint_positions(self) -> np.ndarray:
         if self._topic is None:
@@ -227,10 +316,29 @@ class TB6R5Interface:
             return np.zeros(self.joint_count)
         return self._topic.get_joint_velocities()
 
+    def get_robottarget(self) -> tuple[np.ndarray, np.ndarray, bool]:
+        """TCP pose from Topic: xyz (m), quat_xyzw, healthy.
+
+        Uses vendor ``models_current_points[0].robottarget`` / ``get_current_robottarget``.
+        """
+        if self._topic is None:
+            return np.zeros(3), np.array([0.0, 0.0, 0.0, 1.0]), False
+        return self._topic.get_robottarget()
+
+    def is_robottarget_healthy(self) -> bool:
+        if self._topic is None:
+            return False
+        return self._topic.is_robottarget_healthy()
+
     def get_gripper_distance_mm(self) -> float | None:
         if self._topic is None:
             return None
         return self._topic.get_gripper_distance_mm()
+
+    def get_gripper_distance_m(self) -> float | None:
+        if self._topic is None:
+            return None
+        return self._topic.get_gripper_distance_m()
 
     def go_home(
         self,
@@ -243,28 +351,80 @@ class TB6R5Interface:
         move_timeout_ms: int = DEFAULT_SUBLOOP1_EXIT_TIMEOUT_MS,
         settle_timeout_s: float = 15.0,
     ) -> bool:
+        """Home via exit SubLoop1, then dual-model (not SubLoop1) RPC::
+
+            {NotRunExecute||gripper open ...}   # g_model=2 MoveTwoFingers / g_model=3 JogAnyJ j1
+            {MoveAbsJ ...||NotRunExecute}       # arm home
+
+        Splitting arm/gripper avoids dual SubLoop1 ``subsystem is not enough`` /
+        packing MoveAbsJ+gripper into one SubLoop1 exec.
+        """
         if q is None:
             q = np.zeros(self.joint_count)
         q = np.asarray(q, dtype=float).ravel()
-        arm_inner = self._format_move_abs_j_inner(q)
         if interval is None:
             interval = DEFAULT_TWO_FINGERS_GRIPPER_INTERVAL
-        if gripper_distance is None:
-            grip_inner = NOT_RUN_EXECUTE
-        else:
-            grip_inner = self._format_gripper_inner(gripper_distance, interval, max_distance, min_distance)
-        ok = self._send_subloop1_blocking(
-            arm_inner,
-            grip_inner,
-            timeout_ms=move_timeout_ms,
-            settle_target_q=q[: self.joint_count],
-            settle_timeout_s=settle_timeout_s,
-        )
-        if ok and gripper_distance is not None:
+
+        was_streaming = bool(self._subloop1_active or self._subloop1_exiting)
+        self.exit_subloop1_if_active(timeout_ms=move_timeout_ms, blocking_exit=True)
+        if was_streaming:
+            self.clear_and_recover(log_prefix="go_home post-exit")
+            time.sleep(0.15)
+
+        if gripper_distance is not None:
+            grip_inner = self._format_gripper_inner(
+                gripper_distance, interval, max_distance, min_distance, clear_buffer=0
+            )
+            # Gripper-only dual-model: {NotRunExecute||gripper ...}
+            if not self.send_dual_model(
+                NOT_RUN_EXECUTE,
+                grip_inner,
+                timeout_ms=min(int(move_timeout_ms), 60_000),
+                sleep_s=0.05,
+                log_kind="go_home gripper",
+            ):
+                print(f"[{_RPC_LOG_PREFIX}][RPC] go_home: gripper open FAILED", flush=True)
+                return False
             self._last_gripper_distance_sent = self._clamp_gripper_distance(
                 gripper_distance, max_distance, min_distance
             )
-        return ok
+            if self.g_model == 3:
+                self._gripper_stream_count = 1
+
+        arm_inner = self._format_move_abs_j_inner(q)
+        # Arm-only dual-model: {MoveAbsJ ...||NotRunExecute}
+        if not self.send_dual_model(
+            arm_inner,
+            NOT_RUN_EXECUTE,
+            timeout_ms=int(move_timeout_ms),
+            sleep_s=0.05,
+            log_kind="go_home MoveAbsJ",
+        ):
+            print(f"[{_RPC_LOG_PREFIX}][RPC] go_home: MoveAbsJ FAILED", flush=True)
+            return False
+
+        settled = self._wait_motion_settled(
+            settle_timeout_s, target_q=q[: self.joint_count]
+        )
+        q_now = self.get_joint_positions()
+        q_deg = np.rad2deg(q_now)
+        target_deg = np.rad2deg(q[: self.joint_count])
+        err_deg = q_deg[: self.joint_count] - target_deg
+        print(
+            f"[{_RPC_LOG_PREFIX}][RPC] go_home settle: settled={settled} "
+            f"q_deg={tuple(np.round(q_deg[: self.joint_count], 2))} "
+            f"target_deg={tuple(np.round(target_deg, 2))} "
+            f"err_deg={tuple(np.round(err_deg, 2))}",
+            flush=True,
+        )
+        if not settled:
+            print(
+                f"[{_RPC_LOG_PREFIX}][RPC] WARNING: MoveAbsJ did not reach target within "
+                f"{settle_timeout_s:.1f}s",
+                flush=True,
+            )
+            return False
+        return True
 
     def set_joint_positions_with_gripper(
         self,
@@ -293,17 +453,108 @@ class TB6R5Interface:
         clear_buffer = self._resolve_stream_clear_buffer(self._joint_stream_count, clear_buffer)
         arm_inner = self._strip_cmd_braces(self._format_jog_any_j_cmd(q_cmd, clear_buffer=clear_buffer))
         grip_arg = gripper_distance if gripper_changed else None
+        grip_clear = None
+        if grip_arg is not None and self.g_model == 3:
+            grip_clear = 0 if self._gripper_stream_count == 0 else 1
         ok = self._send_subloop1(
             arm_inner,
             grip_arg,
             interval=interval,
             max_distance=max_distance,
             min_distance=min_distance,
+            gripper_clear_buffer=grip_clear,
         )
         if not ok:
             return False
         self._last_cmd_q = q_cmd
         self._joint_stream_count += 1
+        return True
+
+    @staticmethod
+    def quat_xyzw_to_wxyz(quat_xyzw: np.ndarray) -> np.ndarray:
+        q = np.asarray(quat_xyzw, dtype=float).ravel()
+        if len(q) < 4:
+            return np.array([1.0, 0.0, 0.0, 0.0], dtype=float)
+        qx, qy, qz, qw = float(q[0]), float(q[1]), float(q[2]), float(q[3])
+        return np.array([qw, qx, qy, qz], dtype=float)
+
+    def _format_robottarget_value(self, xyz: np.ndarray, quat_wxyz: np.ndarray) -> str:
+        xyz = np.asarray(xyz, dtype=float).ravel()[:3]
+        quat = np.asarray(quat_wxyz, dtype=float).ravel()
+        if len(quat) < 4:
+            quat = np.array([1.0, 0.0, 0.0, 0.0])
+        qw, qx, qy, qz = float(quat[0]), float(quat[1]), float(quat[2]), float(quat[3])
+        return "{" + ",".join(f"{v:.6f}" for v in (xyz[0], xyz[1], xyz[2], qx, qy, qz, qw)) + "}"
+
+    def _format_jog_any_c_cmd(
+        self,
+        xyz: np.ndarray,
+        quat_wxyz: np.ndarray,
+        clear_buffer: int = 0,
+        zone_ratio: float | None = None,
+        last_count: int = DEFAULT_JOG_ANY_J_LAST_COUNT,
+    ) -> str:
+        val_str = self._format_robottarget_value(xyz, quat_wxyz)
+        cmd = (
+            "{JogAnyC --robottarget_value="
+            + val_str
+            + self._jog_any_j_zone_clear_suffix(clear_buffer, zone_ratio)
+            + f" --last_count={int(last_count)}"
+        )
+        if self.cartesian_vel is not None:
+            cmd += f" --cartesian_vel={float(self.cartesian_vel):.4f}"
+        if self.cartesian_acc is not None:
+            cmd += f" --cartesian_acc={float(self.cartesian_acc):.4f}"
+        if self.cartesian_dec is not None:
+            cmd += f" --cartesian_dec={float(self.cartesian_dec):.4f}"
+        return cmd + "}"
+
+    def set_cartesian_target_with_gripper(
+        self,
+        xyz: np.ndarray,
+        quat_xyzw: np.ndarray,
+        gripper_distance: float,
+        force: bool = False,
+        clear_buffer: int | None = None,
+        interval: float | None = None,
+        max_distance: float | None = None,
+        min_distance: float | None = None,
+        cmd_delta: float | None = None,
+    ) -> bool:
+        """Send JogAnyC + gripper. ``quat_xyzw`` is policy order; RPC uses {x,y,z,qx,qy,qz,qw}."""
+        if not self._ensure_command_channel():
+            return False
+
+        xyz_cmd = np.asarray(xyz, dtype=float).ravel()[:3].copy()
+        quat_wxyz = self.quat_xyzw_to_wxyz(quat_xyzw)
+        gripper_distance = self._clamp_gripper_distance(gripper_distance, max_distance, min_distance)
+        gripper_changed = self._should_send_gripper(
+            gripper_distance,
+            force=force,
+            cmd_delta=cmd_delta,
+            max_distance=max_distance,
+            min_distance=min_distance,
+        )
+
+        clear_buffer = self._resolve_stream_clear_buffer(self._cartesian_stream_count, clear_buffer)
+        arm_inner = self._strip_cmd_braces(self._format_jog_any_c_cmd(xyz_cmd, quat_wxyz, clear_buffer=clear_buffer))
+        grip_arg = gripper_distance if gripper_changed else None
+        grip_clear = None
+        if grip_arg is not None and self.g_model == 3:
+            grip_clear = 0 if self._gripper_stream_count == 0 else 1
+        ok = self._send_subloop1(
+            arm_inner,
+            grip_arg,
+            interval=interval,
+            max_distance=max_distance,
+            min_distance=min_distance,
+            gripper_clear_buffer=grip_clear,
+        )
+        if not ok:
+            return False
+        self._last_cmd_xyz = xyz_cmd
+        self._last_cmd_quat_wxyz = quat_wxyz
+        self._cartesian_stream_count += 1
         return True
 
     def build_subloop1_stream_cmd(
@@ -316,9 +567,10 @@ class TB6R5Interface:
         min_distance: float | None = None,
         immediate: bool | None = None,
     ) -> str:
-        """Build the SubLoop1 exec command string without sending it (for --print-rpc/dry-run).
+        """Build the motion RPC command string without sending it (for --print-rpc/dry-run).
 
         ``gripper_distance=None`` means the gripper slot is NotRunExecute (arm-only step).
+        ``subloop=1`` → SubLoop1 nested exec; ``subloop=0`` → direct ``{arm||grip}``.
         """
         if immediate is None:
             immediate = self.subloop1_immediate
@@ -326,11 +578,55 @@ class TB6R5Interface:
             interval = DEFAULT_TWO_FINGERS_GRIPPER_INTERVAL
         q_cmd = np.asarray(q, dtype=float).ravel()[: self.joint_count]
         arm_inner = self._strip_cmd_braces(self._format_jog_any_j_cmd(q_cmd, clear_buffer=int(clear_buffer)))
-        grip_inner = (
-            NOT_RUN_EXECUTE
-            if gripper_distance is None
-            else self._format_gripper_inner(gripper_distance, interval, max_distance, min_distance)
+        if gripper_distance is None:
+            grip_inner = NOT_RUN_EXECUTE
+        else:
+            grip_clear = 0 if clear_buffer == 0 else 1
+            grip_inner = self._format_gripper_inner(
+                gripper_distance,
+                interval,
+                max_distance,
+                min_distance,
+                clear_buffer=grip_clear,
+            )
+        if not self.use_subloop1:
+            return self.format_dual_model_cmd(arm_inner, grip_inner)
+        return self.format_subloop1_exec_cmd(arm_inner, grip_inner, immediate=immediate)
+
+    def build_cartesian_stream_cmd(
+        self,
+        xyz: np.ndarray,
+        quat_xyzw: np.ndarray,
+        gripper_distance: float | None,
+        clear_buffer: int,
+        interval: float | None = None,
+        max_distance: float | None = None,
+        min_distance: float | None = None,
+        immediate: bool | None = None,
+    ) -> str:
+        """Build JogAnyC (+ gripper) command string without sending (dry-run / --print-rpc)."""
+        if immediate is None:
+            immediate = self.subloop1_immediate
+        if interval is None:
+            interval = DEFAULT_TWO_FINGERS_GRIPPER_INTERVAL
+        xyz_cmd = np.asarray(xyz, dtype=float).ravel()[:3]
+        quat_wxyz = self.quat_xyzw_to_wxyz(quat_xyzw)
+        arm_inner = self._strip_cmd_braces(
+            self._format_jog_any_c_cmd(xyz_cmd, quat_wxyz, clear_buffer=int(clear_buffer))
         )
+        if gripper_distance is None:
+            grip_inner = NOT_RUN_EXECUTE
+        else:
+            grip_clear = 0 if clear_buffer == 0 else 1
+            grip_inner = self._format_gripper_inner(
+                gripper_distance,
+                interval,
+                max_distance,
+                min_distance,
+                clear_buffer=grip_clear,
+            )
+        if not self.use_subloop1:
+            return self.format_dual_model_cmd(arm_inner, grip_inner)
         return self.format_subloop1_exec_cmd(arm_inner, grip_inner, immediate=immediate)
 
     def _should_send_gripper(
@@ -367,13 +663,20 @@ class TB6R5Interface:
         for cmd in init_cmds:
             if not self._send_rpc_sync(cmd, timeout_ms=5000, sleep_s=0.1, log_kind="init"):
                 return False
+        # g_model=2: enable arm only; g_model=3 (new gripper): Enable||Enable + Start||Start
+        if self.g_model == 3:
+            enable_right = "Enable"
+            start_right = "Start"
+        else:
+            enable_right = NOT_RUN_EXECUTE
+            start_right = NOT_RUN_EXECUTE
         if not self.send_dual_model(
-            "Enable", NOT_RUN_EXECUTE, timeout_ms=5000, sleep_s=0.1, log_kind="init Enable"
+            "Enable", enable_right, timeout_ms=5000, sleep_s=0.1, log_kind="init Enable"
         ):
             return False
         ok = self.send_dual_model(
             "Start",
-            NOT_RUN_EXECUTE,
+            start_right,
             timeout_ms=5000,
             sleep_s=0.1,
             ignore_subcmd_errors=True,
@@ -473,6 +776,18 @@ class TB6R5Interface:
             values[i] = float(q[i])
         return "{" + ",".join(f"{v:.6f}" for v in values) + "}"
 
+    def _jog_any_j_zone_clear_suffix(
+        self,
+        clear_buffer: int = 0,
+        zone_ratio: float | None = None,
+    ) -> str:
+        """cd-version 44: --zone_ratio/--clear_buffer; 45: omit both."""
+        if self.cd_version >= 45:
+            return ""
+        if zone_ratio is None:
+            zone_ratio = self.zone_ratio
+        return f" --zone_ratio={float(zone_ratio):.4f} --clear_buffer={int(clear_buffer)}"
+
     def _format_jog_any_j_cmd(
         self,
         q: np.ndarray,
@@ -480,13 +795,12 @@ class TB6R5Interface:
         zone_ratio: float | None = None,
         last_count: int = DEFAULT_JOG_ANY_J_LAST_COUNT,
     ) -> str:
-        if zone_ratio is None:
-            zone_ratio = self.zone_ratio
         val_str = self._format_jointtarget_value(q)
         return (
             "{JogAnyJ --jointtarget_value="
             + val_str
-            + f" --zone_ratio={float(zone_ratio):.4f} --clear_buffer={int(clear_buffer)} --last_count={int(last_count)}"
+            + self._jog_any_j_zone_clear_suffix(clear_buffer, zone_ratio)
+            + f" --last_count={int(last_count)}"
             + f" --joint_vel={self.joint_vel:.4f} --joint_acc={self.joint_acc:.4f} --joint_dec={self.joint_dec:.4f}"
             + "}"
         )
@@ -508,10 +822,44 @@ class TB6R5Interface:
         min_distance: float | None = None,
     ) -> float:
         lo = float(DEFAULT_GRIPPER_MIN_D if min_distance is None else min_distance)
-        hi = float(DEFAULT_GRIPPER_MAX_D if max_distance is None else max_distance)
+        if max_distance is None:
+            hi = float(DEFAULT_GRIPPER_G3_MAX_D if self.g_model == 3 else DEFAULT_GRIPPER_MAX_D)
+        else:
+            hi = float(max_distance)
         if lo > hi:
             lo, hi = hi, lo
         return max(lo, min(float(distance), hi))
+
+    def _gripper_mm_to_joint(self, distance_mm: float) -> float:
+        """Map opening mm → gripper JogAnyJ j1 (meters). 0–full_scale ↔ joint_min–joint_max."""
+        scale = self.gripper_jog_mm_full_scale
+        mm = max(0.0, min(float(distance_mm), scale))
+        j_lo = self.gripper_jog_joint_min
+        j_hi = self.gripper_jog_joint_max
+        return j_lo + (mm / scale) * (j_hi - j_lo)
+
+    def _format_gripper_jog_any_j_inner(
+        self,
+        distance: float,
+        max_distance: float | None = None,
+        min_distance: float | None = None,
+        clear_buffer: int | None = None,
+        last_count: int = DEFAULT_JOG_ANY_J_LAST_COUNT,
+    ) -> str:
+        """New gripper (g_model=3): right slot JogAnyJ on j1 only (meters)."""
+        distance = self._clamp_gripper_distance(distance, max_distance, min_distance)
+        j1 = self._gripper_mm_to_joint(distance)
+        if clear_buffer is None:
+            clear_buffer = 0 if self._gripper_stream_count == 0 else 1
+        val_str = self._format_jointtarget_value(np.array([j1], dtype=float))
+        return (
+            f"JogAnyJ --jointtarget_value={val_str}"
+            f"{self._jog_any_j_zone_clear_suffix(clear_buffer)}"
+            f" --last_count={int(last_count)}"
+            f" --joint_vel={self.gripper_jog_joint_vel:.4f}"
+            f" --joint_acc={self.gripper_jog_joint_acc:.4f}"
+            f" --joint_dec={self.gripper_jog_joint_dec:.4f}"
+        )
 
     def _format_gripper_inner(
         self,
@@ -519,7 +867,15 @@ class TB6R5Interface:
         interval: float,
         max_distance: float | None = None,
         min_distance: float | None = None,
+        clear_buffer: int | None = None,
     ) -> str:
+        if self.g_model == 3:
+            return self._format_gripper_jog_any_j_inner(
+                distance,
+                max_distance=max_distance,
+                min_distance=min_distance,
+                clear_buffer=clear_buffer,
+            )
         distance = self._clamp_gripper_distance(distance, max_distance, min_distance)
         interval = max(0.0, float(interval))
         return f"MoveTwoFingersGripper --distance={distance:.4f} --interval={interval:.4f}"
@@ -563,9 +919,15 @@ class TB6R5Interface:
         if self._rpc is None:
             return False
 
+        gen = self._subloop1_session_gen
+
         def _on_response(status: int, resp_list):
             with self._state_lock:
                 self._jog_async_pending = max(0, self._jog_async_pending - 1)
+                stale = gen != self._subloop1_session_gen
+            if stale:
+                # Intentionally aborted session (exit/home); do not mark server_in_error.
+                return
             if status < 0:
                 self._server_in_error = True
                 self._last_rpc_error = f"SubLoop1 first exec async timeout (status={status})"
@@ -588,21 +950,37 @@ class TB6R5Interface:
         return bool(ok)
 
     def _send_subloop1_stream_async(self, cmd: str) -> bool:
+        """Subsequent SubLoop1 exec: fire-and-forget (expect_resp=False).
+
+        High-rate JogAnyJ must not register per-frame pending responses: on Ctrl+C/exit
+        hundreds of CallAsync callbacks would otherwise time out as status=-3 and spam
+        ``No valid pending response for seqID``.
+        """
         if self._rpc is None:
             return False
 
         def _on_response(status: int, resp_list):
-            with self._state_lock:
-                self._subloop1_stream_pending = max(0, self._subloop1_stream_pending - 1)
-            if status < 0:
-                print(f"[TB6R5] SubLoop1 stream async failed (status={status}): {cmd[:120]}...")
+            # With expect_resp=False the SDK usually will not call this; keep a no-op
+            # for bindings that still invoke it.
+            return
 
         with _filter_stdout_lines(_should_drop_jog_any_j_rpc_log):
-            ok = self._rpc.call_async(cmd, DEFAULT_SUBLOOP1_EXEC_TIMEOUT_MS, _on_response)
-        if ok:
-            with self._state_lock:
-                self._subloop1_stream_pending += 1
+            ok = self._rpc.call_async(
+                cmd, DEFAULT_SUBLOOP1_EXEC_TIMEOUT_MS, _on_response, expect_resp=False
+            )
         return bool(ok)
+
+    def drain_async_pending(self, timeout_s: float = 2.0) -> int:
+        """Wait until tracked first-exec / stream pending counters reach 0. Returns leftover."""
+        deadline = time.monotonic() + max(float(timeout_s), 0.0)
+        leftover = 0
+        while time.monotonic() < deadline:
+            with self._state_lock:
+                leftover = self._jog_async_pending + self._subloop1_stream_pending
+            if leftover == 0:
+                return 0
+            time.sleep(0.01)
+        return leftover
 
     def _finalize_subloop1_session(self) -> None:
         self._subloop1_active = False
@@ -610,8 +988,15 @@ class TB6R5Interface:
         with self._state_lock:
             self._jog_async_pending = 0
             self._subloop1_stream_pending = 0
+            self._subloop1_session_gen += 1
+        # Next SubLoop1 session should start with clear_buffer=0 for arm/gripper streams.
+        self._joint_stream_count = 0
+        self._cartesian_stream_count = 0
+        self._gripper_stream_count = 0
 
     def send_subloop1_exit(self, timeout_ms: int = DEFAULT_SUBLOOP1_EXIT_TIMEOUT_MS, blocking: bool = False) -> bool:
+        if not self.use_subloop1:
+            return True
         if not self._subloop1_active and not self._subloop1_exiting:
             return True
         if self._rpc is None:
@@ -641,6 +1026,8 @@ class TB6R5Interface:
         self._subloop1_active = False
         with self._state_lock:
             self._subloop1_stream_pending = 0
+            # Invalidate JogAnyJ first-exec immediately so late ErrorInfo cannot poison homing.
+            self._subloop1_session_gen += 1
 
         ok = self._rpc.call_async(cmd, timeout_ms, _on_response)
         if not ok:
@@ -670,14 +1057,30 @@ class TB6R5Interface:
         timeout_ms: int | None = None,
         settle_timeout_s: float = 2.0,
         blocking_exit: bool = False,
+        drain_timeout_s: float = 2.0,
     ) -> bool:
+        if not self.use_subloop1:
+            return True
         if not self._subloop1_active and not self._subloop1_exiting:
             return True
         if timeout_ms is None:
             timeout_ms = DEFAULT_SUBLOOP1_EXIT_TIMEOUT_MS
+        # Stop-stream hygiene: drain tracked async first, then settle, then exit.
+        leftover = self.drain_async_pending(drain_timeout_s)
+        if leftover:
+            print(
+                f"[{_RPC_LOG_PREFIX}][RPC] WARNING: {leftover} async RPC still pending "
+                f"before SubLoop1 exit (will exit anyway)",
+                flush=True,
+            )
         if blocking_exit and self._subloop1_active:
             self._wait_motion_settled(settle_timeout_s)
         return self.send_subloop1_exit(timeout_ms=timeout_ms, blocking=blocking_exit)
+
+    @property
+    def use_subloop1(self) -> bool:
+        """True when Jog/gripper are wrapped in ``SubLoop1 --exec={...}`` (``subloop=1``)."""
+        return self.subloop != 0
 
     def _send_subloop1(
         self,
@@ -687,31 +1090,51 @@ class TB6R5Interface:
         max_distance: float | None = None,
         min_distance: float | None = None,
         immediate: bool | None = None,
+        gripper_clear_buffer: int | None = None,
     ) -> bool:
+        """Send arm+gripper exec.
+
+        ``subloop=1`` (default): ``{SubLoop1 --exec={arm}||SubLoop1 --exec={grip}}``.
+        ``subloop=0``: direct ``{arm||grip}`` (no SubLoop1 nesting / no exit).
+        """
         if not self._ensure_command_channel():
             return False
         if immediate is None:
             immediate = self.subloop1_immediate
         if interval is None:
             interval = DEFAULT_TWO_FINGERS_GRIPPER_INTERVAL
-        grip_inner = (
-            NOT_RUN_EXECUTE
-            if gripper_distance is None
-            else self._format_gripper_inner(gripper_distance, interval, max_distance, min_distance)
-        )
-        cmd = self.format_subloop1_exec_cmd(arm_inner, grip_inner, immediate=immediate)
-        if self._subloop1_exiting:
-            return False
-        slot = "first" if not self._subloop1_active else "stream"
-        self._log_rpc_send(f"SubLoop1 {slot} send", cmd, always=False)
-        if not self._subloop1_active:
-            ok = self._send_subloop1_first_async(cmd)
+        arm_inner = (arm_inner or NOT_RUN_EXECUTE).strip()
+        if gripper_distance is None:
+            grip_inner = NOT_RUN_EXECUTE
         else:
+            if gripper_clear_buffer is None:
+                gripper_clear_buffer = 0 if self._gripper_stream_count == 0 else 1
+            grip_inner = self._format_gripper_inner(
+                gripper_distance,
+                interval,
+                max_distance,
+                min_distance,
+                clear_buffer=gripper_clear_buffer,
+            )
+        if not self.use_subloop1:
+            cmd = self.format_dual_model_cmd(arm_inner, grip_inner)
+            self._log_rpc_send("dual-model stream send", cmd, always=False)
             ok = self._send_subloop1_stream_async(cmd)
+        else:
+            cmd = self.format_subloop1_exec_cmd(arm_inner, grip_inner, immediate=immediate)
+            if self._subloop1_exiting:
+                return False
+            slot = "first" if not self._subloop1_active else "stream"
+            self._log_rpc_send(f"SubLoop1 {slot} send", cmd, always=False)
+            if not self._subloop1_active:
+                ok = self._send_subloop1_first_async(cmd)
+            else:
+                ok = self._send_subloop1_stream_async(cmd)
         if ok and gripper_distance is not None:
             self._last_gripper_distance_sent = self._clamp_gripper_distance(
                 gripper_distance, max_distance, min_distance
             )
+            self._gripper_stream_count += 1
         return ok
 
     def _send_subloop1_blocking(
@@ -723,7 +1146,13 @@ class TB6R5Interface:
         settle_target_q: np.ndarray | None = None,
         settle_timeout_s: float = 15.0,
     ) -> bool:
+        was_streaming = bool(self._subloop1_active or self._subloop1_exiting)
         self.exit_subloop1_if_active(timeout_ms=timeout_ms, blocking_exit=True)
+        # After killing a high-rate JogAnyJ session, controller often needs Clear+Recover
+        # before MoveAbsJ in a new SubLoop1 will actually move (else settle stays at stream pose).
+        if was_streaming:
+            self.clear_and_recover(log_prefix="post-jog-exit")
+            time.sleep(0.15)
         cmd = self.format_subloop1_exec_cmd(arm_inner, grip_inner, immediate=immediate)
         self._log_rpc_send("SubLoop1 blocking send", cmd, always=True)
         if not self._send_subloop1_first_async(cmd):

@@ -16,9 +16,11 @@
 
 2. Dry-run（验证相机 + 推理输出，不发 RPC）
       tb6r5-policy-infer ... --dry-run
+      # 或: tb6r5-policy-infer -c configs/infer_example.yaml --dry-run
 
 3. 真机（去掉 --dry-run，首次建议 --fps 10）
       tb6r5-policy-infer ...
+      # 或: tb6r5-policy-infer -c configs/infer_example.yaml
 ```
 
 ---
@@ -93,7 +95,8 @@ cd /home/ai/pi0.5/chaishan   # 仓库根；按实际路径调整
 python -m pip install -e "./tb6r5_policy_infer[hardware]" --no-deps
 
 # 再补依赖。lerobot 会拉 torchvision 等；装完若 torch 变 CPU 版，立刻用上面的 wheel 盖回去
-python -m pip install "lerobot==0.4.4" opencv-python matplotlib tyro
+python -m pip install "lerobot==0.5.1" "transformers>=5.3.0,<6.0.0" "huggingface-hub>=1.16.0,<2.0.0" \
+  opencv-python matplotlib
 
 # 若 torch 被换成 2.10.0+cpu / cuda=False，重新装回 Jetson wheel：
 cd /home/ai/jetson_jp6_cu126
@@ -103,7 +106,7 @@ pip install --force-reinstall --no-deps \
   torchaudio-2.10.0-cp310-cp310-linux_aarch64.whl
 ```
 
-> **说明：** `lerobot 0.4.4` 声明 `torch<2.11`，与 JP6.2 所需的 torch 2.11 会有 pip 警告，可忽略；以 `torch.cuda.is_available()` 为准。  
+> **说明：** `lerobot 0.5.1` 与 Jetson 专用 torch 2.11 可能有 pip 版本警告，可忽略；以 `torch.cuda.is_available()` 为准。  
 > 若直接 `pip install -e "...[hardware]"`（不带 `--no-deps`），同样可能把 torch 覆盖成 PyPI CPU 版，装完务必验证 CUDA。
 
 ##### 3）自检
@@ -139,11 +142,11 @@ tb6r5-policy-infer --robot-ip 192.168.11.11 --policy-path model/... \
 
 ```bash
 cd <仓库根>
-conda activate tb6r5
+conda activate tb6r5   # 或你的环境名
 
-pip install "lerobot==0.4.4"
+pip install "lerobot==0.5.1" "transformers>=5.3.0,<6.0.0" "huggingface-hub>=1.16.0,<2.0.0"
 pip install -e "./tb6r5_policy_infer[hardware]"
-pip install tyro numpy torch opencv-python
+pip install torch   # x86：用官方 CUDA wheel；勿在 Jetson 上执行本行
 ```
 
 ### 远程机器更新
@@ -165,7 +168,7 @@ python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
 
 ### Checkpoint 路径
 
-`--policy-path` 须指向 `**pretrained_model` 目录**（含 `config.json`、`model.safetensors`、processor json），不是上一级 `checkpoints/` 目录：
+`--policy-path` 须指向 **`pretrained_model` 目录**（含 `config.json`、`model.safetensors`、processor json），不是上一级 `checkpoints/` 目录：
 
 ```text
 outputs/train/tb6r5_rings_P05/checkpoints/100000/pretrained_model   ✓
@@ -219,9 +222,17 @@ tb6r5-policy-infer \
   --joint-step-max-rad 0.03
 ```
 
+**V4L2 相机 dry-run（TER30 示例）：**
+
+```bash
+tb6r5-policy-infer \
+  --robot-ip 192.168.11.11 \
+  --policy-path /home/ai/pi0.5/wqp/XRcopy/model/act_rings_P02/080000/pretrained_model \
+  --device cuda \
+  --camera-devices 'realsense_0=/dev/video2,realsense_1=/dev/video8' \
+  --dry-run --no-show-camera
 ```
-(/home/ai/condaenv/tb6r5) test@TER30JB3-ubuntu:/home/ai/jetson_jp6_cu126$ tb6r5-policy-infer   --robot-ip 192.168.11.11   --policy-path /home/ai/pi0.5/wqp/XRcopy/model/act_rings_P02/080000/pretrained_model   --device cuda   --camera-devices 'realsense_0=/dev/video2,realsense_1=/dev/video8'   --dry-run --no-show-camera
-```
+
 **Diffusion 真机（P05 示例，夹爪为 mm，勿加 `--gripper-normalized`；默认 fps=15）：**
 
 ```bash
@@ -235,7 +246,15 @@ tb6r5-policy-infer \
 **SmolVLA 真机（VLA，必须给 `--task`；默认 fps=10）：**
 
 ```bash
-tb6r5-policy-infer   --robot-ip 192.168.11.11   --policy-path /home/ai/chaishan/model/smolvla-rings/checkpoints/020000/pretrained_model/   --device cuda   --joint-step-max-rad 0.03   --camera-urls 'realsense_0=http://192.168.11.11:8888/RsCameraSensor/1/0/color,realsense_1=http://192.168.11.11:8888/RsCameraSensor/0/0/color'   --fps 20 --task "Pick up the purple ring and place it on the white plate." --dry-run
+tb6r5-policy-infer \
+  --robot-ip 192.168.11.11 \
+  --policy-path /home/ai/chaishan/model/smolvla-rings/checkpoints/020000/pretrained_model/ \
+  --device cuda \
+  --joint-step-max-rad 0.03 \
+  --camera-urls 'realsense_0=http://192.168.11.11:8888/RsCameraSensor/1/0/color,realsense_1=http://192.168.11.11:8888/RsCameraSensor/0/0/color' \
+  --fps 20 \
+  --task "Pick up the purple ring and place it on the white plate." \
+  --dry-run
 ```
 
 **pi0.5 真机（`type=pi05`，同为 VLA，必须给 `--task`；默认 fps=8）：**
@@ -260,6 +279,8 @@ python -m tb6r5_policy_infer.cli --robot-ip 192.168.11.11 --policy-path ... --dr
 
 ### 观测 / 动作约定
 
+默认 `--action-space joints`：
+
 
 | 字段                                 | 形状        | 单位 / 说明                                                |
 | ---------------------------------- | --------- | ------------------------------------------------------ |
@@ -270,26 +291,131 @@ python -m tb6r5_policy_infer.cli --robot-ip 192.168.11.11 --policy-path ... --dr
 
 训练时夹爪为 **[0,1] 归一化** 的数据集，加 `--gripper-normalized`（见下文「夹爪单位」）。
 
+`--action-space ee_pose`（pi05 等 TCP 策略）：
+
+
+| 字段                  | 形状 | 单位 / 说明 |
+| ------------------- | -- | -------- |
+| `observation.state` | 8  | `[x,y,z, qx,qy,qz,qw, gripper_m]`；TCP 来自 Topic `robottarget`，夹爪为 **米** |
+| `action`            | 8  | 同上；经 `--ee-step-max-m` 限幅平移后以 **JogAnyC** + 夹爪 RPC 下发 |
+
+
+```bash
+tb6r5-policy-infer \
+  --robot-ip 192.168.11.11 \
+  --policy-path /path/to/pi05/pretrained_model \
+  --action-space ee_pose \
+  --ee-step-max-m 0.03 \
+  --g-model 3 \
+  --cd-version 45 \
+  --task "你的任务文本" \
+  --camera-serials 'realsense_0=135522071053,realsense_1=244222075136' \
+  --camera-width 640 --camera-height 480 --camera-fps 30 \
+  --dry-run
+```
+
+逻辑名须与训练 `observation.images.*` 一致；换物理机只改 `=` 右侧。也可用 `--camera-devices` / `--camera-urls`（优先级 urls > devices > serials）。
+
 ### 安全与生命周期
 
 
 | 参数                                         | 默认       | 说明                             |
 | ------------------------------------------ | -------- | ------------------------------ |
 | `--dry-run`                                | 关        | 只推理打印，不发 RPC                   |
-| `--print-rpc`                              | 关        | 每次发送时打印完整 SubLoop1 RPC 指令（dry-run 打印"本应发送"的指令），不受 `--print-every` 限流 |
+| `--print-rpc`                              | 关        | 每次发送打印完整 SubLoop1 / JogAnyJ 指令（dry-run 打印「本应发送」）；不受 `--print-every` 限流 |
 | `--fps`                                    | 按策略      | 控制循环频率；默认按策略类型自动选择（见上表），显式传值覆盖 |
 | `--joint-step-max-rad`                     | 0.03     | 策略输出限幅：每步最大关节变化（rad）           |
-| `--home-joint-deg`                         | 遥操作 home | 启动 / Ctrl+C 复位姿态（度）            |
+| `--home-joint-deg`                         | 遥操作 home | 复位目标关节角（度）×6                  |
 | `--home-settle-time`                       | 3 s      | 复位后等待                          |
-| `--no-home-on-start` / `--no-home-on-exit` | 关        | 跳过启动或退出复位                      |
-| `--print-every`                            | 0.5 s    | 调试打印间隔                         |
+| `--no-home-on-start`                       | 关        | 跳过**启动**复位                     |
+| `--home-on-exit`                           | 关        | **Ctrl+C / 退出**时再 MoveAbsJ 回 home（默认就地停） |
+| `--print-every`                            | 0.5 s    | 动作调试打印间隔                       |
+| `--config` / `-c`                          | 无        | 从 YAML 读参数；**同名 CLI 覆盖 YAML**  |
 
 
-退出：`Ctrl+C` → 停相机 →（可选）复位 → `arm.disable()`。
+#### 复位（开始 / 结束 / 中断）
+
+| 时机 | 是否复位 | 参数 |
+|------|----------|------|
+| **开始**（连上机器人后） | **默认会** | `--no-home-on-start` 跳过 |
+| **结束 / Ctrl+C** | **默认不会**（就地停 → `Disable`） | `--home-on-exit` 才回 home |
+| **推理过程中** | 无自动复位 | — |
+
+```bash
+# 默认：开始复位，Ctrl+C 不复位
+tb6r5-policy-infer --robot-ip 192.168.11.11 --policy-path ...
+
+# 开始也不复位
+tb6r5-policy-infer ... --no-home-on-start
+
+# 开始 + 退出都复位
+tb6r5-policy-infer ... --home-on-exit
+
+# 全程不复位
+tb6r5-policy-infer ... --no-home-on-start
+# （不要加 --home-on-exit）
+```
+
+退出流程：`Ctrl+C` → 停相机 →（可选 `--home-on-exit` 复位）→ `arm.disable()`。
+
+### YAML 配置启动
+
+可用 **纯 CLI**、**纯 YAML**，或 **YAML + CLI 覆盖**（CLI 优先）。
+
+```bash
+# 纯 YAML（必填 robot_ip / policy_path 写在文件里）
+tb6r5-policy-infer --config configs/infer_example.yaml
+tb6r5-policy-infer -c configs/infer_example.yaml
+
+# YAML + 临时覆盖（例如 dry-run / 改 IP）
+tb6r5-policy-infer -c configs/infer_example.yaml --dry-run --robot-ip 192.168.2.160
+
+# 纯 CLI（与以前相同）
+tb6r5-policy-infer --robot-ip 192.168.11.11 --policy-path model/.../pretrained_model --dry-run
+```
+
+示例文件：[`configs/infer_example.yaml`](configs/infer_example.yaml)。
+
+YAML 键名与 argparse **dest** 一致（下划线），例如 `robot_ip`、`policy_path`、`home_on_exit`、`subloop`。  
+便捷写法：`home_on_start: true/false`（等价于是否加 `--no-home-on-start` 的反义）。
+
+```yaml
+robot_ip: "192.168.11.11"
+policy_path: "model/act/080000/pretrained_model"
+device: cuda
+dry_run: false
+subloop: 1
+g_model: 2
+home_on_start: true    # 启动复位
+home_on_exit: false    # Ctrl+C 不复位
+home_joint_deg: [80, -70, 70, -90, -90, -60]
+```
+
+依赖：`pyyaml`（已写入 `pyproject.toml`）。
+
+#### `fps` / `arm_rpc_rate_hz` / `gripper_rpc_rate_hz`
+
+这三项在 YAML 或 CLI 里都可以**省略**，由策略类型自动填默认；一旦写成具体数字就会**生效且不被策略默认覆盖**。
+
+| YAML / CLI | 行为 |
+|------------|------|
+| 不写、注释掉、或 `null` | 保持未设置 → 用策略默认（ACT：`fps≈30`、臂 RPC≈`fps`、夹爪 2Hz；`g_model=3` 时夹爪跟臂同频） |
+| 写成数字，如 `arm_rpc_rate_hz: 20` | 显式生效，等价 `--arm-rpc-rate-hz 20` |
+
+```yaml
+# fps: 30                 # 省略则用策略默认
+# arm_rpc_rate_hz: null   # 等同省略
+# gripper_rpc_rate_hz: null
+
+arm_rpc_rate_hz: 20       # 显式：臂 20Hz
+gripper_rpc_rate_hz: 5    # 显式：夹爪 5Hz
+```
+
+实际下发还会被控制环 `fps` 限住（`stride = round(fps / rate)`），臂 RPC 设得比 `fps` 高没有意义。
 
 ### JogAnyJ 运动参数（RPC 层）
 
-策略输出的关节目标经 `--joint-step-max-rad` 限幅后，通过 SubLoop1 `JogAnyJ` 下发。下列参数写入 RPC 命令的 `--joint_vel` / `--joint_acc` / `--joint_dec` / `--zone_ratio`，控制**机器人执行**时的运动学限制。**推理包默认取保守值 `1 / 1 / 1 / 0`（比遥操作更慢更稳，便于首次真机验证）**；确认安全后再逐步调大。
+策略输出的关节目标经 `--joint-step-max-rad` 限幅后，通过 SubLoop1 `JogAnyJ` 下发。下列参数写入 RPC 命令的 `--joint_vel` / `--joint_acc` / `--joint_dec` / `--zone_ratio`，控制**机器人执行**时的运动学限制。**推理包默认 `1 / 1 / 1 / 0`（偏保守，便于首次真机验证）**；确认安全后再逐步调大。
 
 
 | 参数             | 默认  | 说明                             |
@@ -322,20 +448,42 @@ tb6r5-policy-infer ... \
 
 实现位置：`runner.py` → `tb6r5_policy_infer.hardware.tb6r5`（底层 RPC 使用内置 `send_commend_py/rpc_py_all`）。
 
-### RPC 与夹爪
+### RPC 与夹爪 / 控制器方言
 
 
 | 参数                       | 默认              | 说明                                      |
 | ------------------------ | --------------- | --------------------------------------- |
-| `--arm-rpc-rate-hz`      | 按策略（匹配 `--fps`） | 臂 SubLoop1 下发频率                         |
-| `--gripper-rpc-rate-hz`  | 2               | 夹爪 SubLoop1 下发频率                        |
-| `--gripper-max-distance` | 70              | 全开距离（mm）                                |
+| `--arm-rpc-rate-hz`      | 按策略（匹配 `--fps`） | 臂下发频率；YAML/CLI 写数字则覆盖策略默认；`null`/省略才用默认 |
+| `--gripper-rpc-rate-hz`  | 2（`--g-model 3` 时跟臂同频） | 夹爪下发频率；同上，写数字即生效 |
+| `--g-model`              | 2               | `2`=MoveTwoFingersGripper（0–70mm）；`3`=JogAnyJ j1（Enable\|\|Enable，0–80mm） |
+| `--cd-version`           | 44              | JogAnyJ 方言：`44` 含 `--zone_ratio/--clear_buffer`；`45` 省略二者 |
+| `--subloop`              | 1               | `1`=`SubLoop1 --exec` 嵌套（默认）；`0`=直接 `{arm\|\|grip}`，**不发** SubLoop1 exit |
+| `--gripper-max-distance` | 70（g_model=3 且未改时自动升到 80） | 全开距离（mm）                    |
 | `--gripper-min-distance` | 30              | 全合距离（mm）                                |
+| `--gripper-interval`     | 25              | MoveTwoFingersGripper interval（仅 g_model=2） |
 | `--gripper-continuous`   | 开               | 连续 mm；`--no-gripper-continuous` 为滞回二值模式 |
-| `--gripper-cmd-delta`    | 0.5             | 夹爪指令变化小于此值（mm）不重发 RPC                   |
+| `--gripper-cmd-delta`    | 0.5             | 配合 `--gripper-threshold`：变化小于此值（mm）不重发 |
+| `--gripper-threshold`    | 关               | 开启夹爪 mm 死区门控                             |
 
 
-### ACT 部署调参（无需重新训练）b
+```bash
+# 新夹爪（JogAnyJ j1）+ cd45 控制器
+tb6r5-policy-infer ... --g-model 3 --cd-version 45
+
+# 直连 dual-model（无 SubLoop1 嵌套 / 无 exit）
+tb6r5-policy-infer ... --subloop 0
+
+# 打印每条流式指令（调试用，很刷屏）
+tb6r5-policy-infer ... --print-rpc
+```
+
+下发路径：
+
+- `--subloop 1`（默认）：`{SubLoop1 --exec={JogAnyJ ...}||SubLoop1 --exec={夹爪}}`，停止/回 home 会发 SubLoop1 exit
+- `--subloop 0`：`{JogAnyJ ...||夹爪}`，**不发** SubLoop1 exit
+
+
+### ACT 部署调参（无需重新训练）
 
 三者互斥注意：**不要**同时开 `--temporal-ensemble-coeff` 与 `--refresh-policy-every-step`。
 
@@ -435,8 +583,8 @@ export TB6R5_DEPS_ROOT=/path/to/dependencies   # 含 hello_demo_py/ 与 get_stat
 
 | 用途        | 包内路径（`<vendor>` = `vendor/` 或 `vendor_py312/`） |
 | --------- | ---------------------------------------------- |
-| RPC 发指令   | `/send_commend_py/rpc_py_all/lib/linux/{x86    |
-| Topic 读状态 | `/get_status_py/topic_all_py/lib/{x86          |
+| RPC 发指令   | `<vendor>/send_commend_py/rpc_py_all/lib/linux/{x86,arm}/` |
+| Topic 读状态 | `<vendor>/get_status_py/topic_all_py/lib/{x86,arm}/` |
 
 
 **Python 版本与 SDK 树（自动选择）：** `.so` 按 CPython 版本编译，运行时由 `sdk_paths.py` 依据 `sys.version_info` 选用：
@@ -582,17 +730,19 @@ pip install "transformers>=4.57.1,<5.0.0" "huggingface-hub>=0.34.2,<0.36.0"
 
 | 模块               | 说明                                                           |
 | ---------------- | ------------------------------------------------------------ |
-| `cli`            | 真机推理 CLI（`tb6r5-policy-infer`）                               |
+| `cli`            | 真机推理 CLI（`tb6r5-policy-infer`）；支持 `--config` YAML |
+| `config_loader`  | YAML 加载与 CLI 合并                                       |
 | `eval_cli`       | 离线评估 CLI（`tb6r5-policy-eval`）                                |
 | `runner`         | 硬件控制循环                                                       |
 | `policy`         | 模型加载与各策略推理 override（ACT/Diffusion/SmolVLA/pi0/pi05/pi0_fast） |
 | `deploy`         | 策略类型识别、每策略真机部署默认（fps/RPC/队列/task）与 CLI 校验                    |
 | `camera`         | RealSense、V4L2、HTTP 采集                                       |
 | `gripper`        | 夹爪观测与指令辅助                                                    |
-| `hardware/`      | TB6-R5 RPC/Topic（`tb6r5.py`）与 RealSense 相机                   |
+| `hardware/`      | 内置 TB6-R5 RPC/Topic（`tb6r5.py`）与 RealSense（不依赖 `xrobotoolkit_teleop`） |
+| `vendor/` / `vendor_py312/` | 厂商 `rpc.so` / `topic.so`（按 Python 3.10 / 3.12 选用） |
 | `lerobot_compat` | LeRobot 版本兼容与 config 加载                                      |
 
 
-真机部署只需更新本推理包；SDK 已内置在 `tb6r5_policy_infer/vendor/`（也可用 `TB6R5_DEPS_ROOT` 覆盖）。
+真机部署只需更新本推理包；SDK 已内置在 `tb6r5_policy_infer/vendor*`（也可用 `TB6R5_DEPS_ROOT` 覆盖）。
 
-等价的 legacy 入口：`scripts/hardware/policy_infer_tb6r5_act.py`（推荐统一使用 `tb6r5-policy-infer`）。
+仓库里仍保留 legacy 入口 `scripts/hardware/policy_infer_tb6r5_act.py`，**推荐统一使用** `tb6r5-policy-infer`。
