@@ -44,6 +44,13 @@ _KNOWN_KEYS = frozenset(
         "n_action_steps",
         "temporal_ensemble_coeff",
         "refresh_policy_every_step",
+        "dummy",
+        "dummy_mode",
+        "dummy_wiggle_amp_m",
+        "dummy_wiggle_period_s",
+        "replay_episode",
+        "replay_loop",
+        "replay_source",
         "camera_serials",
         "camera_devices",
         "camera_urls",
@@ -128,7 +135,10 @@ def validate_required_args(args: argparse.Namespace) -> None:
     missing = []
     if not getattr(args, "robot_ip", None):
         missing.append("robot_ip (--robot-ip or YAML)")
-    if not getattr(args, "policy_path", None):
-        missing.append("policy_path (--policy-path or YAML)")
+    dummy = bool(getattr(args, "dummy", False) or getattr(args, "replay_episode", None) is not None)
+    if not dummy and not getattr(args, "policy_path", None):
+        missing.append("policy_path (--policy-path or YAML; skip with --dummy / --replay-episode)")
+    if getattr(args, "replay_episode", None) is not None and not getattr(args, "dataset_root", None):
+        missing.append("dataset_root (--dataset-root; required with --replay-episode)")
     if missing:
         raise SystemExit(f"Missing required options: {', '.join(missing)}")

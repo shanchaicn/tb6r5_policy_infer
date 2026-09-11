@@ -1,0 +1,59 @@
+# Dummy (no checkpoint) — test cameras + Topic/RPC only.
+# Usage:
+#   tb6r5-policy-infer -c configs/dummy.yaml
+#   tb6r5-policy-infer -c configs/dummy.yaml --dummy-mode wiggle   # small Y sinusoid
+#   tb6r5-policy-infer -c configs/dummy.yaml --dry-run --print-rpc
+  #  tb6r5-policy-infer -c configs/dummy.yaml \
+  # --dataset-root /home/shan/study/XRoboToolkit-Teleop-Sample-Python/data/lerobot/0902lerobot-clean \
+  # --replay-episode 0 \
+  # --dry-run --print-rpc
+# hold: keep current TCP / joints (safe). wiggle: ±dummy_wiggle_amp_m on Y.
+
+dummy: true
+dummy_mode: hold
+dummy_wiggle_amp_m: 0.02
+dummy_wiggle_period_s: 6.0
+
+# Replay a recorded episode instead of hold/wiggle (no checkpoint):
+dataset_root: "/home/ai/chaishan/data/0902lerobot-clean"
+# dataset_root: "/home/shan/study/XRoboToolkit-Teleop-Sample-Python/data/lerobot/0902lerobot-clean"
+# replay_episode: 0
+# replay_source: action    # or state
+# replay_loop: false
+
+robot_ip: "192.168.11.11"
+
+device: cuda
+fps: 20
+dry_run: false
+print_rpc: true
+print_every: 0.5
+
+joint_step_max_rad: 0.03
+joint_vel: 1.0
+joint_acc: 1.0
+joint_dec: 1.0
+zone_ratio: 0.0
+cd_version: 45
+subloop: 0
+g_model: 3
+
+home_on_start: false
+home_on_exit: false
+
+gripper_max_distance: 80.0
+gripper_min_distance: 0.0
+gripper_continuous: true
+gripper_normalized: false
+
+no_camera: false
+show_camera: true
+camera_width: 640
+camera_height: 480
+camera_fps: 30
+camera_preview_fps: 15
+# camera_serials: "front=262322074140,wrist=347622071274"
+camera_urls: "front=http://192.168.11.11:6888/RsCameraSensor/0/0/color,wrist=http://192.168.11.11:6888/RsCameraSensor/1/0/color"
+# camera_urls: "front=http://192.168.2.213:6888/RsCameraSensor/0/0/color,wrist=http://192.168.2.213:6888/RsCameraSensor/1/0/color"
+action_space: ee_pose
+ee_step_max_m: 0.05

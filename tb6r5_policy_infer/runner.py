@@ -41,6 +41,59 @@ from .gripper import (
 from .policy import load_policy_components, policy_action_queue_info, prepare_policy_for_hardware
 
 
+def _policy_image_keys(policy) -> list[str]:
+    feats = getattr(getattr(policy, "config", None), "input_features", None) or {}
+    return sorted(str(k) for k in feats if "images" in str(k) and "depth" not in str(k))
+
+
+def _image_stats_line(name: str, arr) -> str:
+    a = np.asarray(arr)
+    if a.size == 0:
+        return f"{name} empty"
+    return f"{name} shape={tuple(a.shape)} mean={float(a.mean()):.1f} min={int(a.min())} max={int(a.max())}"
+
+
+def _assert_camera_keys_match_policy(policy, camera_names: list[str]) -> None:
+    expected = _policy_image_keys(policy)
+    fed = [f"observation.images.{n}" for n in camera_names]
+    missing = [k for k in expected if k not in fed]
+    extra = [k for k in fed if k not in expected]
+    print(f"[{INFER_LOG_PREFIX}][camera] policy expects: {expected}")
+    print(f"[{INFER_LOG_PREFIX}][camera] runner will feed: {fed}")
+    if missing:
+        raise ValueError(
+            "Camera names do not match the checkpoint. The policy will not see the trained images.\n"
+            f"  missing in feed: {missing}\n"
+            f"  extra in feed:   {extra}\n"
+            "Fix --camera-serials / --camera-urls / --camera-devices left-hand names "
+            "(must match observation.images.<name> in config.json)."
+        )
+    if extra:
+        print(f"[{INFER_LOG_PREFIX}][camera] WARNING: extra image keys not in policy (ignored): {extra}")
+
+
+def _probe_images_into_preprocessor(observation: dict, preprocessor, device, task: str | None) -> None:
+    """One-shot check that image tensors survive prepare + preprocessor (what the net actually gets)."""
+    from copy import copy
+
+    try:
+        from lerobot.policies.utils import prepare_observation_for_inference
+    except ImportError:
+        from lerobot.common.policies.utils import prepare_observation_for_inference
+
+    obs = copy(observation)
+    obs = prepare_observation_for_inference(obs, torch.device(device), task, "tb6r5")
+    processed = preprocessor(obs)
+    for key in sorted(k for k in processed if "images" in str(k)):
+        t = processed[key]
+        a = t.detach().float().cpu().numpy()
+        print(
+            f"[{INFER_LOG_PREFIX}][camera] into-model {key} tensor={tuple(a.shape)} "
+            f"mean={float(a.mean()):.4f} min={float(a.min()):.3f} max={float(a.max()):.3f}",
+            flush=True,
+        )
+
+
 def go_home(
     arm,
     home_joint_deg: tuple[float, ...],
@@ -117,16 +170,58 @@ def run_inference(args) -> int:
     if action_space == "ee_pose" and args.gripper_normalized:
         raise ValueError("--gripper-normalized is not supported with --action-space ee_pose (use gripper_m)")
 
-    policy, preprocessor, postprocessor = load_policy_components(
-        policy_path=args.policy_path,
-        dataset_root=args.dataset_root,
-        repo_id=args.repo_id,
-        device=args.device,
-    )
-    # Validate CLI against the policy type, fill per-policy fps/RPC defaults,
-    # and apply type-specific inference overrides. This resolves args.fps /
-    # args.arm_rpc_rate_hz / args.gripper_rpc_rate_hz (which default to None).
-    prepare_policy_for_hardware(policy, args)
+    dummy = bool(getattr(args, "dummy", False) or getattr(args, "replay_episode", None) is not None)
+    dummy_policy = None
+    policy = None
+    preprocessor = None
+    postprocessor = None
+    if dummy:
+        from .dummy import DummyPolicy, apply_dummy_loop_defaults
+
+        if getattr(args, "replay_episode", None) is not None:
+            from .replay import ReplayPolicy, dataset_fps, load_episode_vectors
+
+            if getattr(args, "fps", None) is None:
+                fps = dataset_fps(args.dataset_root)
+                if fps is not None:
+                    args.fps = fps
+            apply_dummy_loop_defaults(args)
+            vecs = load_episode_vectors(
+                args.dataset_root,
+                int(args.replay_episode),
+                source=getattr(args, "replay_source", "action"),
+            )
+            dummy_policy = ReplayPolicy(
+                vecs,
+                loop=bool(getattr(args, "replay_loop", False)),
+                episode_index=int(args.replay_episode),
+                source=getattr(args, "replay_source", "action"),
+            )
+            print(
+                f"[{INFER_LOG_PREFIX}] Replay → RPC ({action_space}). "
+                f"Use --ee-step-max-m / --joint-step-max-rad to clamp jumps from the live pose.",
+                flush=True,
+            )
+        else:
+            apply_dummy_loop_defaults(args)
+            dummy_policy = DummyPolicy(
+                action_space=action_space,
+                mode=getattr(args, "dummy_mode", "hold"),
+                wiggle_amp_m=float(getattr(args, "dummy_wiggle_amp_m", 0.02)),
+                wiggle_period_s=float(getattr(args, "dummy_wiggle_period_s", 6.0)),
+            )
+        policy = dummy_policy
+    else:
+        policy, preprocessor, postprocessor = load_policy_components(
+            policy_path=args.policy_path,
+            dataset_root=args.dataset_root,
+            repo_id=args.repo_id,
+            device=args.device,
+        )
+        # Validate CLI against the policy type, fill per-policy fps/RPC defaults,
+        # and apply type-specific inference overrides. This resolves args.fps /
+        # args.arm_rpc_rate_hz / args.gripper_rpc_rate_hz (which default to None).
+        prepare_policy_for_hardware(policy, args)
 
     if args.fps <= 0:
         raise ValueError("--fps must be > 0")
@@ -150,6 +245,10 @@ def run_inference(args) -> int:
     else:
         camera_names = sorted(parse_camera_serials(args.camera_serials, DEFAULT_REALSENSE_SERIAL_DICT).keys())
         print(f"[{INFER_LOG_PREFIX}] --no-camera: feeding black frames (predictions will be meaningless)")
+    if dummy:
+        print(f"[{INFER_LOG_PREFIX}][camera] dummy feed names: {list(camera_names)}")
+    else:
+        _assert_camera_keys_match_policy(policy, camera_names)
 
     arm = None
     home_joint_deg = tuple(args.home_joint_deg)
@@ -324,32 +423,64 @@ def run_inference(args) -> int:
             for name in camera_names:
                 observation[f"observation.images.{name}"] = last_images[name]
 
-            if args.refresh_policy_every_step:
+            if control_step == 0:
+                for name in camera_names:
+                    key = f"observation.images.{name}"
+                    print(f"[{INFER_LOG_PREFIX}][camera] raw {_image_stats_line(key, observation[key])}", flush=True)
+                    mean = float(np.asarray(observation[key]).mean())
+                    if mean < 1.0:
+                        print(
+                            f"[{INFER_LOG_PREFIX}][camera] WARNING: {key} looks black (mean={mean:.2f}). "
+                            "Policy is not seeing the scene — check serials/URLs and preview.",
+                            flush=True,
+                        )
+                if dummy:
+                    from .dummy import save_camera_snapshots
+
+                    save_camera_snapshots(observation, camera_names)
+                elif preprocessor is not None:
+                    _probe_images_into_preprocessor(
+                        observation,
+                        preprocessor,
+                        policy.config.device,
+                        args.task,
+                    )
+
+            if args.refresh_policy_every_step and not dummy:
                 policy.reset()
 
-            action_tensor = predict_action(
-                observation=observation,
-                policy=policy,
-                device=torch.device(policy.config.device),
-                preprocessor=preprocessor,
-                postprocessor=postprocessor,
-                use_amp=False,
-                task=args.task,
-                robot_type="tb6r5",
-            )
-            action = action_tensor.squeeze(0).detach().cpu().numpy().astype(np.float32)
+            if dummy:
+                action = dummy_policy.predict(observation, time.time())
+            else:
+                action_tensor = predict_action(
+                    observation=observation,
+                    policy=policy,
+                    device=torch.device(policy.config.device),
+                    preprocessor=preprocessor,
+                    postprocessor=postprocessor,
+                    use_amp=False,
+                    task=args.task,
+                    robot_type="tb6r5",
+                )
+                action = action_tensor.squeeze(0).detach().cpu().numpy().astype(np.float32)
 
             ee_xyz_cmd = None
             ee_quat_xyzw_cmd = None
+            xyz_tgt = None
             q_target = q_current
             q_cmd = q_current
             if action_space == "ee_pose":
                 xyz_tgt, quat_xyzw_tgt, gripper_raw_m = unpack_ee_action_xyzw(action)
-                ee_xyz_cmd = clamp_ee_step(
-                    xyz_tgt,
-                    xyz_current,
-                    getattr(args, "ee_step_max_m", None),
-                )
+                # Dry-run / missing Topic: current TCP is zeros. Do not clamp from origin
+                # or replay/policy targets get squashed to ee_step_max_m.
+                if tcp_ok:
+                    ee_xyz_cmd = clamp_ee_step(
+                        xyz_tgt,
+                        xyz_current,
+                        getattr(args, "ee_step_max_m", None),
+                    )
+                else:
+                    ee_xyz_cmd = np.asarray(xyz_tgt, dtype=np.float32).ravel()[:3].copy()
                 ee_quat_xyzw_cmd = canonicalize_quat_xyzw(quat_xyzw_tgt)
                 gripper_raw = gripper_raw_m
                 gripper_cmd_mm = clip_gripper_mm(
@@ -400,7 +531,7 @@ def run_inference(args) -> int:
                 )
                 send_gripper = edge_accepted
 
-            chunk_step, chunk_size = policy_action_queue_info(policy)
+            chunk_step, chunk_size = (None, 1) if dummy else policy_action_queue_info(policy)
 
             gripper_subloop: str | None = None
             on_arm_rpc_tick = on_rpc_tick(control_step, arm_stride)
@@ -504,12 +635,22 @@ def run_inference(args) -> int:
                     gripper_subloop = f"JogAnyJ j1={j1:.4f}m ({gripper_mm_for_rpc:.2f}mm)"
 
             if now - last_print >= args.print_every:
+                cam_bits = []
+                for name in camera_names:
+                    img = last_images.get(name)
+                    if img is None:
+                        cam_bits.append(f"{name}=missing")
+                    else:
+                        cam_bits.append(f"{name} mean={float(np.asarray(img).mean()):.1f} max={int(np.asarray(img).max())}")
+                print(f"[{INFER_LOG_PREFIX}][camera] {' | '.join(cam_bits)}", flush=True)
                 if action_space == "ee_pose":
                     action7_str = f"action[7]={gripper_raw:.4f}m"
+                    xyz_act = np.round(xyz_tgt, 4) if xyz_tgt is not None else "n/a"
                     print(
                         f"[{INFER_LOG_PREFIX}] "
                         f"xyz={np.round(xyz_current, 4)} "
                         f"quat_xyzw={np.round(quat_xyzw_current, 4)} "
+                        f"xyz_act={xyz_act} "
                         f"xyz_cmd={np.round(ee_xyz_cmd, 4)} "
                         f"quat_cmd={np.round(ee_quat_xyzw_cmd, 4)} "
                         f"{action7_str}"
@@ -558,6 +699,12 @@ def run_inference(args) -> int:
                 last_print = now
 
             control_step += 1
+            if dummy and getattr(dummy_policy, "finished", False):
+                print(
+                    f"[{INFER_LOG_PREFIX}] Replay episode finished ({control_step} ticks). Stopping.",
+                    flush=True,
+                )
+                break
             elapsed = time.time() - start_t
             if elapsed < dt:
                 time.sleep(dt - elapsed)

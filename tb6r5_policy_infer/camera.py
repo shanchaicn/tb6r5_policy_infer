@@ -40,23 +40,30 @@ def show_camera_rgb(images: dict[str, np.ndarray]) -> None:
     """Show RGB frames in OpenCV windows (RGB -> BGR for imshow)."""
     import cv2
 
-    for name, rgb in images.items():
-        if rgb is None:
-            continue
-        bgr = cv2.cvtColor(np.asarray(rgb), cv2.COLOR_RGB2BGR)
-        window = f"{INFER_LOG_PREFIX} RGB - {name}"
-        if window not in _PREVIEW_WINDOWS:
-            cv2.namedWindow(window, cv2.WINDOW_AUTOSIZE)
-            _PREVIEW_WINDOWS.add(window)
-        cv2.imshow(window, bgr)
-    cv2.waitKey(1)
+    try:
+        for name, rgb in images.items():
+            if rgb is None:
+                continue
+            bgr = cv2.cvtColor(np.asarray(rgb), cv2.COLOR_RGB2BGR)
+            window = f"{INFER_LOG_PREFIX} RGB - {name}"
+            if window not in _PREVIEW_WINDOWS:
+                cv2.namedWindow(window, cv2.WINDOW_AUTOSIZE)
+                _PREVIEW_WINDOWS.add(window)
+            cv2.imshow(window, bgr)
+        cv2.waitKey(1)
+    except cv2.error:
+        # Headless wheels (no GTK/Qt highgui) cannot open windows.
+        pass
 
 
 def destroy_camera_windows() -> None:
     import cv2
 
     _PREVIEW_WINDOWS.clear()
-    cv2.destroyAllWindows()
+    try:
+        cv2.destroyAllWindows()
+    except cv2.error:
+        pass
 
 
 class CameraPreview:

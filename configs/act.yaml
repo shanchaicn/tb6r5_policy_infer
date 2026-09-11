@@ -1,0 +1,79 @@
+# TB6-R5 policy inference example config
+# Usage:
+#   tb6r5-policy-infer --config configs/infer_example.yaml
+#   tb6r5-policy-infer -c configs/infer_example.yaml --dry-run   # CLI overrides YAML
+#
+# Keys use argparse dest names (underscores). Unknown keys are rejected.
+# Convenience: home_on_start: true/false  ↔  --no-home-on-start inverted
+
+# --- required ---
+robot_ip: "192.168.11.11"
+policy_path: "/home/ai/pi0.5/model/actmodel/pretrained_model"
+# policy_path: "/home/ai/pi0.5/model/008000/pretrained_model/"
+# policy_path: "model/act/080000/pretrained_model"
+
+# --- device / policy ---
+device: cuda          # auto | cuda | cpu
+policy_type: act     # auto | act | diffusion | smolvla | pi0 | pi05 | pi0_fast
+# task: "Pick up the purple ring and place it on the white plate."  # required for VLA
+fps: 20               # omit / null → per-policy default; set a number to override
+# arm_rpc_rate_hz: null   # omit / null → policy default (≈ fps for ACT)
+# gripper_rpc_rate_hz: null  # omit / null → 2 Hz (or = arm when g_model=3)
+# arm_rpc_rate_hz: 20     # explicit → takes effect, not overwritten by policy defaults
+# gripper_rpc_rate_hz: 5
+
+# --- safety / loop ---
+dry_run: false
+print_rpc: true
+print_every: 0.5
+joint_step_max_rad: 0.03
+joint_vel: 1.0
+joint_acc: 1.0
+joint_dec: 1.0
+zone_ratio: 0.0
+cd_version: 45        # 44 or 45
+subloop: 0            # 1=SubLoop1 nest; 0=direct {arm||grip}, no SubLoop1 exit
+g_model: 3            # 2=MoveTwoFingers; 3=JogAnyJ j1
+
+# --- homing (start / Ctrl+C exit) ---
+# Start: default home ON. Use home_on_start: false  OR  no_home_on_start: true  to skip.
+# Exit / Ctrl+C: default home OFF. Use home_on_exit: true to home before Disable.
+home_on_start: false
+home_on_exit: false
+home_settle_time: 3.0
+home_joint_deg: [80, -70, 70, -90, -90, -60]
+
+# --- gripper ---
+gripper_max_distance: 70.0
+gripper_min_distance: 30.0
+gripper_continuous: true
+gripper_normalized: false
+# gripper_threshold: false
+# gripper_cmd_delta: 0.5
+# gripper_interval: 25.0
+
+# --- camera (pick one mode; urls > devices > serials) ---
+# 逻辑名须与训练 observation.images.<name> 一致；换机只改 = 右侧
+no_camera: false
+show_camera: true
+# 浏览器看实时画面: http://<本机IP>:8765/   截图: /tmp/tb6r5_preview/*.jpg
+# OpenCV/xcb 窗口默认关闭（conda Qt 会卡住）；确需窗口时: export TB6R5_OPENCV_PREVIEW=1
+preview_http_port: 8765
+camera_width: 640
+camera_height: 480
+camera_fps: 30
+camera_preview_fps: 15
+camera_serials: "front=262322074140,wrist=347622071274"
+# camera_devices: "realsense_0=/dev/video0,realsense_1=/dev/video4"
+# camera_urls: "front=http://192.168.11.11:6888/RsCameraSensor/0/0/color,wrist=http://192.168.11.11:6888/RsCameraSensor/1/0/color"
+
+# --- Action space ---
+# joints (default): observation/action = [j0..j5, gripper_mm], JogAnyJ
+# ee_pose: observation/action = [x,y,z,qx,qy,qz,qw,gripper_m], Topic robottarget + JogAnyC
+action_space: ee_pose
+ee_step_max_m: 0.10
+
+# --- ACT optional ---
+n_action_steps: 10
+temporal_ensemble_coeff: 0.01
+# refresh_policy_every_step: false

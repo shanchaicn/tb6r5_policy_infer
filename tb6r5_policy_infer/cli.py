@@ -68,17 +68,58 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--policy-path",
         default=None,
-        help="Path (or HF repo) of pretrained checkpoint (required via CLI or YAML)",
+        help="Path (or HF repo) of pretrained checkpoint (required unless --dummy)",
+    )
+    parser.add_argument(
+        "--dummy",
+        action="store_true",
+        help="Skip checkpoint: echo current pose (hold) or small wiggle. Tests cameras + RPC only.",
+    )
+    parser.add_argument(
+        "--dummy-mode",
+        default="hold",
+        choices=("hold", "wiggle"),
+        help="dummy hold=keep current pose; wiggle=slow sinusoid (ee Y or joint0). Default: hold",
+    )
+    parser.add_argument(
+        "--dummy-wiggle-amp-m",
+        type=float,
+        default=0.02,
+        help="ee_pose dummy wiggle amplitude in meters (Y axis). Default: 0.02",
+    )
+    parser.add_argument(
+        "--dummy-wiggle-period-s",
+        type=float,
+        default=6.0,
+        help="dummy wiggle period in seconds. Default: 6",
     )
     parser.add_argument(
         "--dataset-root",
         default=None,
-        help="Optional LeRobot dataset root (only needed if loading stats from the dataset)",
+        help="LeRobot dataset root (eval stats, or --replay-episode)",
     )
     parser.add_argument(
         "--repo-id",
         default=None,
         help="Optional LeRobot repo_id (only used together with --dataset-root)",
+    )
+    parser.add_argument(
+        "--replay-episode",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Replay dataset episode N actions as RPC (no checkpoint). Requires --dataset-root.",
+    )
+    parser.add_argument(
+        "--replay-loop",
+        action="store_true",
+        help="Loop the replayed episode instead of stopping at the last frame.",
+    )
+    parser.add_argument(
+        "--replay-source",
+        default="action",
+        choices=("action", "state"),
+        help="Which parquet column to replay: recorded action (default) or observation.state.",
     )
     parser.add_argument(
         "--task",
