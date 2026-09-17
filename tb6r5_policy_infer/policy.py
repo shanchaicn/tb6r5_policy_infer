@@ -13,7 +13,12 @@ from .deploy import (
     print_policy_deploy_summary,
     validate_inference_cli_args,
 )
-from .lerobot_compat import import_policy_factory, load_pretrained_config, resolve_inference_device
+from .lerobot_compat import (
+    build_preprocessor_overrides,
+    import_policy_factory,
+    load_pretrained_config,
+    resolve_inference_device,
+)
 from .constants import INFER_LOG_PREFIX
 
 
@@ -40,7 +45,7 @@ def load_policy_components(policy_path: str, dataset_root: str | None, repo_id: 
         policy_cfg=cfg,
         pretrained_path=policy_path,
         dataset_stats=dataset_stats,
-        preprocessor_overrides={"device_processor": {"device": str(policy.config.device)}},
+        preprocessor_overrides=build_preprocessor_overrides(policy_path, policy.config.device),
     )
     return policy, preprocessor, postprocessor
 

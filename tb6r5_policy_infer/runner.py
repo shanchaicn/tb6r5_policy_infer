@@ -9,15 +9,25 @@ import torch
 
 from .lerobot_compat import predict_action
 
-from .camera import CameraPreview, create_camera_stream, destroy_camera_windows, parse_camera_serials
+from .camera import (
+    CameraPreview,
+    create_camera_stream,
+    destroy_camera_windows,
+    parse_camera_devices,
+    parse_camera_serials,
+    parse_camera_urls,
+)
 from .constants import BOLD_GREEN, DEFAULT_REALSENSE_SERIAL_DICT, INFER_LOG_PREFIX, RESET
 from .ee_pose import (
     canonicalize_quat_xyzw,
     clamp_ee_step,
+    clamp_ee_workspace,
     gripper_m_to_mm,
     gripper_mm_to_m,
     pack_ee_state_xyzw,
+    parse_xyz_limit,
     unpack_ee_action_xyzw,
+    validate_ee_workspace,
 )
 from .gripper import (
     clamp_joint_step,
@@ -46,18 +56,18 @@ def _policy_image_keys(policy) -> list[str]:
     return sorted(str(k) for k in feats if "images" in str(k) and "depth" not in str(k))
 
 
-def _image_stats_line(name: str, arr) -> str:
-    a = np.asarray(arr)
-    if a.size == 0:
-        return f"{name} empty"
-    return f"{name} shape={tuple(a.shape)} mean={float(a.mean()):.1f} min={int(a.min())} max={int(a.max())}"
+def _is_padding_camera_name(name: str) -> bool:
+    """OpenPI/pi05 pads unused views as empty_camera_* — not a physical camera."""
+    return name.startswith("empty_camera") or name.startswith("empty_")
 
 
 def _assert_camera_keys_match_policy(policy, camera_names: list[str]) -> None:
     expected = _policy_image_keys(policy)
+    expected_real = [k for k in expected if not _is_padding_camera_name(k.rsplit(".", 1)[-1])]
     fed = [f"observation.images.{n}" for n in camera_names]
-    missing = [k for k in expected if k not in fed]
+    missing = [k for k in expected_real if k not in fed]
     extra = [k for k in fed if k not in expected]
+    pad = [k for k in expected if k not in expected_real]
     print(f"[{INFER_LOG_PREFIX}][camera] policy expects: {expected}")
     print(f"[{INFER_LOG_PREFIX}][camera] runner will feed: {fed}")
     if missing:
@@ -70,6 +80,19 @@ def _assert_camera_keys_match_policy(policy, camera_names: list[str]) -> None:
         )
     if extra:
         print(f"[{INFER_LOG_PREFIX}][camera] WARNING: extra image keys not in policy (ignored): {extra}")
+    if pad:
+        print(
+            f"[{INFER_LOG_PREFIX}][camera] Leaving unused slots unfed {pad}; "
+            "PI05/SmolVLA fill them with masked dummy tensors (ignored).",
+            flush=True,
+        )
+
+
+def _image_stats_line(name: str, arr) -> str:
+    a = np.asarray(arr)
+    if a.size == 0:
+        return f"{name} empty"
+    return f"{name} shape={tuple(a.shape)} mean={float(a.mean()):.1f} min={int(a.min())} max={int(a.max())}"
 
 
 def _probe_images_into_preprocessor(observation: dict, preprocessor, device, task: str | None) -> None:
@@ -170,6 +193,20 @@ def run_inference(args) -> int:
     if action_space == "ee_pose" and args.gripper_normalized:
         raise ValueError("--gripper-normalized is not supported with --action-space ee_pose (use gripper_m)")
 
+    ee_xyz_min = parse_xyz_limit(getattr(args, "ee_xyz_min", None), name="ee_xyz_min")
+    ee_xyz_max = parse_xyz_limit(getattr(args, "ee_xyz_max", None), name="ee_xyz_max")
+    validate_ee_workspace(ee_xyz_min, ee_xyz_max)
+    ee_limit_mode = str(getattr(args, "ee_limit_mode", "clamp") or "clamp").strip().lower()
+    if ee_limit_mode not in ("clamp", "abort"):
+        raise ValueError(f"--ee-limit-mode must be 'clamp' or 'abort', got {ee_limit_mode!r}")
+    if action_space == "ee_pose" and (ee_xyz_min is not None or ee_xyz_max is not None):
+        lo = "off" if ee_xyz_min is None else [round(float(v), 4) for v in ee_xyz_min]
+        hi = "off" if ee_xyz_max is None else [round(float(v), 4) for v in ee_xyz_max]
+        print(
+            f"[{INFER_LOG_PREFIX}] Cartesian workspace limit mode={ee_limit_mode} "
+            f"xyz_min={lo} xyz_max={hi} (meters)"
+        )
+
     dummy = bool(getattr(args, "dummy", False) or getattr(args, "replay_episode", None) is not None)
     dummy_policy = None
     policy = None
@@ -243,7 +280,12 @@ def run_inference(args) -> int:
         cam_stream.start()
         cam_stream.wait_ready()
     else:
-        camera_names = sorted(parse_camera_serials(args.camera_serials, DEFAULT_REALSENSE_SERIAL_DICT).keys())
+        if args.camera_urls:
+            camera_names = sorted(parse_camera_urls(args.camera_urls))
+        elif args.camera_devices:
+            camera_names = sorted(parse_camera_devices(args.camera_devices))
+        else:
+            camera_names = sorted(parse_camera_serials(args.camera_serials, DEFAULT_REALSENSE_SERIAL_DICT))
         print(f"[{INFER_LOG_PREFIX}] --no-camera: feeding black frames (predictions will be meaningless)")
     if dummy:
         print(f"[{INFER_LOG_PREFIX}][camera] dummy feed names: {list(camera_names)}")
@@ -315,6 +357,7 @@ def run_inference(args) -> int:
 
     dt = 1.0 / args.fps
     last_print = 0.0
+    last_ee_limit_print = 0.0
     last_images: dict[str, np.ndarray] = {name: black.copy() for name in camera_names}
     held_gripper_open: bool | None = True if (arm is not None and not args.no_home_on_start) else None
     pending_gripper_mm: float | None = None
@@ -467,6 +510,7 @@ def run_inference(args) -> int:
             ee_xyz_cmd = None
             ee_quat_xyzw_cmd = None
             xyz_tgt = None
+            ee_limit_hit = False
             q_target = q_current
             q_cmd = q_current
             if action_space == "ee_pose":
@@ -481,6 +525,25 @@ def run_inference(args) -> int:
                     )
                 else:
                     ee_xyz_cmd = np.asarray(xyz_tgt, dtype=np.float32).ravel()[:3].copy()
+                ee_xyz_cmd, ee_limit_hit, ee_limit_overflow = clamp_ee_workspace(
+                    ee_xyz_cmd, ee_xyz_min, ee_xyz_max
+                )
+                if ee_limit_hit:
+                    t_hit = time.time()
+                    if ee_limit_mode == "abort" or (t_hit - last_ee_limit_print >= args.print_every):
+                        print(
+                            f"[{INFER_LOG_PREFIX}][ee-limit] TCP xyz outside workspace "
+                            f"(overflow_m={np.round(ee_limit_overflow, 4)}, mode={ee_limit_mode}) "
+                            f"cmd={np.round(ee_xyz_cmd, 4)}",
+                            flush=True,
+                        )
+                        last_ee_limit_print = t_hit
+                    if ee_limit_mode == "abort":
+                        print(
+                            f"[{INFER_LOG_PREFIX}][ee-limit] abort: skipping JogAnyC and stopping.",
+                            flush=True,
+                        )
+                        break
                 ee_quat_xyzw_cmd = canonicalize_quat_xyzw(quat_xyzw_tgt)
                 gripper_raw = gripper_raw_m
                 gripper_cmd_mm = clip_gripper_mm(
@@ -654,6 +717,7 @@ def run_inference(args) -> int:
                         f"xyz_cmd={np.round(ee_xyz_cmd, 4)} "
                         f"quat_cmd={np.round(ee_quat_xyzw_cmd, 4)} "
                         f"{action7_str}"
+                        + (" ee_limit=HIT" if ee_limit_hit else "")
                     )
                 else:
                     if args.gripper_normalized:

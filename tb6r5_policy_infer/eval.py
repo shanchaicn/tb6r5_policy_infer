@@ -11,7 +11,13 @@ import numpy as np
 import torch
 
 from lerobot.datasets.lerobot_dataset import LeRobotDataset, LeRobotDatasetMetadata
-from .lerobot_compat import import_policy_factory, load_pretrained_config, predict_action, resolve_inference_device
+from .lerobot_compat import (
+    build_preprocessor_overrides,
+    import_policy_factory,
+    load_pretrained_config,
+    predict_action,
+    resolve_inference_device,
+)
 
 
 def to_numpy(x: Any) -> np.ndarray:
@@ -254,7 +260,7 @@ def run_eval(args) -> int:
         policy_cfg=cfg,
         pretrained_path=args.policy_path,
         dataset_stats=ds_meta.stats,
-        preprocessor_overrides={"device_processor": {"device": str(policy.config.device)}},
+        preprocessor_overrides=build_preprocessor_overrides(args.policy_path, policy.config.device),
     )
 
     image_keys = sorted(

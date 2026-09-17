@@ -7,14 +7,15 @@
 # Convenience: home_on_start: true/false  ↔  --no-home-on-start inverted
 
 # --- required ---
-robot_ip: "192.168.2.174"
-policy_path: "model/act/080000/pretrained_model"
+robot_ip: "192.168.11.11"
+policy_path: "/home/ai/pi0.5/model/008000/pretrained_model/"
+# policy_path: "model/act/080000/pretrained_model"
 
 # --- device / policy ---
 device: cuda          # auto | cuda | cpu
-policy_type: auto     # auto | act | diffusion | smolvla | pi0 | pi05 | pi0_fast
-# task: "Pick up the purple ring and place it on the white plate."  # required for VLA
-fps: 30               # omit / null → per-policy default; set a number to override
+policy_type: pi05     # auto | act | diffusion | smolvla | pi0 | pi05 | pi0_fast
+task: "Pick up the purple ring and place it on the white plate."  # required for VLA
+fps: null               # omit / null → per-policy default; set a number to override
 # arm_rpc_rate_hz: null   # omit / null → policy default (≈ fps for ACT)
 # gripper_rpc_rate_hz: null  # omit / null → 2 Hz (or = arm when g_model=3)
 # arm_rpc_rate_hz: 20     # explicit → takes effect, not overwritten by policy defaults
@@ -22,7 +23,7 @@ fps: 30               # omit / null → per-policy default; set a number to over
 
 # --- safety / loop ---
 dry_run: false
-print_rpc: false
+print_rpc: true
 print_every: 0.5
 joint_step_max_rad: 0.03
 joint_vel: 1.0
@@ -36,7 +37,7 @@ g_model: 3            # 2=MoveTwoFingers; 3=JogAnyJ j1
 # --- homing (start / Ctrl+C exit) ---
 # Start: default home ON. Use home_on_start: false  OR  no_home_on_start: true  to skip.
 # Exit / Ctrl+C: default home OFF. Use home_on_exit: true to home before Disable.
-home_on_start: true
+home_on_start: false
 home_on_exit: false
 home_settle_time: 3.0
 home_joint_deg: [80, -70, 70, -90, -90, -60]
@@ -58,15 +59,19 @@ camera_width: 640
 camera_height: 480
 camera_fps: 30
 camera_preview_fps: 15
-camera_serials: "realsense_0=135522071053,realsense_1=244222075136"
+# camera_serials: "realsense_0=135522071053,realsense_1=244222075136"
 # camera_devices: "realsense_0=/dev/video0,realsense_1=/dev/video4"
-# camera_urls: "realsense_0=http://192.168.11.11:8888/RsCameraSensor/0/0/color,realsense_1=http://192.168.11.11:8888/RsCameraSensor/1/0/color"
+camera_urls: "front=http://192.168.11.11:6888/RsCameraSensor/0/0/color,wrist=http://192.168.11.11:6888/RsCameraSensor/1/0/color"
 
 # --- Action space ---
 # joints (default): observation/action = [j0..j5, gripper_mm], JogAnyJ
 # ee_pose: observation/action = [x,y,z,qx,qy,qz,qw,gripper_m], Topic robottarget + JogAnyC
-# action_space: ee_pose
-# ee_step_max_m: 0.03
+action_space: ee_pose
+ee_step_max_m: 0.03
+# Cartesian workspace box in meters (robot base / JogAnyC frame). omit / null → no box.
+ee_xyz_min: [0.00, 0.20, 0.10]
+ee_xyz_max: [0.50, 0.80, 0.70]
+ee_limit_mode: abort   # clamp: clip into box and send; abort: skip JogAnyC and stop
 
 # --- ACT optional ---
 # n_action_steps: 10

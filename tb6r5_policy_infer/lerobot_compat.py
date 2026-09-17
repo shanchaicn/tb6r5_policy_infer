@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import importlib.util
+from importlib.metadata import PackageNotFoundError, version
 import json
 import sys
 import types
@@ -16,8 +17,27 @@ from lerobot.configs.policies import PreTrainedConfig
 from .constants import INFER_LOG_PREFIX
 
 
+def _lerobot_version_tuple() -> tuple[int, int]:
+    try:
+        raw_version = version("lerobot")
+    except PackageNotFoundError:
+        return (0, 0)
+
+    parts = raw_version.split(".", 2)
+    try:
+        return (int(parts[0]), int(parts[1]))
+    except (IndexError, ValueError):
+        return (0, 0)
+
+
 def _install_groot_config_stub() -> None:
     """Register groot config only, skipping groot/__init__.py (and transformers)."""
+    # LeRobot 0.6 made policy imports lazy and its GrootConfig uses package-
+    # relative imports. Loading that module through the legacy stub causes a
+    # circular import in lerobot.policies.factory.
+    if _lerobot_version_tuple() >= (0, 6):
+        return
+
     import lerobot
 
     groot_name = "lerobot.policies.groot"
@@ -110,12 +130,136 @@ def load_pretrained_config(policy_path: str | Path) -> PreTrainedConfig:
         return draccus.decode(config_cls, filtered)
 
 
+def _install_relative_action_processor_stubs() -> None:
+    """Register no-op relative/absolute action processors missing on this lerobot.
+
+    Newer checkpoints may include ``relative_actions_processor`` /
+    ``absolute_actions_processor`` steps. When ``enabled`` is false they are
+    identity transforms; register pass-through stubs so loading still works.
+    """
+    try:
+        from lerobot.configs.types import PipelineFeatureType, PolicyFeature
+        from lerobot.processor.core import EnvTransition
+        from lerobot.processor.pipeline import ProcessorStep, ProcessorStepRegistry
+    except ImportError:
+        return
+
+    registry = ProcessorStepRegistry._registry
+
+    if "relative_actions_processor" not in registry:
+
+        @ProcessorStepRegistry.register("relative_actions_processor")
+        @dataclasses.dataclass
+        class _RelativeActionsProcessorStub(ProcessorStep):
+            enabled: bool = False
+            exclude_joints: list[str] | None = None
+            action_names: list[str] | None = None
+
+            def __call__(self, transition: EnvTransition) -> EnvTransition:
+                if self.enabled:
+                    raise RuntimeError(
+                        "relative_actions_processor is enabled, but this lerobot build "
+                        "lacks the real implementation. Upgrade lerobot or re-export "
+                        "the checkpoint with use_relative_actions=false."
+                    )
+                return transition
+
+            def transform_features(
+                self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
+            ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
+                return features
+
+            def get_config(self) -> dict:
+                return {
+                    "enabled": self.enabled,
+                    "exclude_joints": self.exclude_joints,
+                    "action_names": self.action_names,
+                }
+
+    if "absolute_actions_processor" not in registry:
+
+        @ProcessorStepRegistry.register("absolute_actions_processor")
+        @dataclasses.dataclass
+        class _AbsoluteActionsProcessorStub(ProcessorStep):
+            enabled: bool = False
+
+            def __call__(self, transition: EnvTransition) -> EnvTransition:
+                if self.enabled:
+                    raise RuntimeError(
+                        "absolute_actions_processor is enabled, but this lerobot build "
+                        "lacks the real implementation. Upgrade lerobot."
+                    )
+                return transition
+
+            def transform_features(
+                self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
+            ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
+                return features
+
+            def get_config(self) -> dict:
+                return {"enabled": self.enabled}
+
+
+def resolve_local_hf_snapshot(repo_id: str) -> str | None:
+    """Return a local HF hub snapshot path for ``repo_id`` if fully cached, else None."""
+    if not repo_id or repo_id.startswith(("/", ".", "~")):
+        return None
+    try:
+        from huggingface_hub import snapshot_download
+
+        return snapshot_download(repo_id=repo_id, local_files_only=True)
+    except Exception:
+        return None
+
+
+def read_processor_tokenizer_name(policy_path: str | Path) -> str | None:
+    """Read ``tokenizer_name`` from ``policy_preprocessor.json`` if present."""
+    path = Path(policy_path) / "policy_preprocessor.json"
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    for step in data.get("steps") or []:
+        if step.get("registry_name") != "tokenizer_processor":
+            continue
+        name = (step.get("config") or {}).get("tokenizer_name")
+        if isinstance(name, str) and name.strip():
+            return name.strip()
+    return None
+
+
+def build_preprocessor_overrides(policy_path: str | Path, device: str) -> dict:
+    """Build preprocessor overrides, remapping hub tokenizer ids to local cache when offline."""
+    import os
+
+    overrides: dict = {"device_processor": {"device": str(device)}}
+    tokenizer_name = read_processor_tokenizer_name(policy_path)
+    if not tokenizer_name:
+        return overrides
+
+    local = resolve_local_hf_snapshot(tokenizer_name)
+    if local:
+        overrides["tokenizer_processor"] = {"tokenizer_name": local}
+        print(f"[compat] Using local tokenizer cache for {tokenizer_name}: {local}")
+        return overrides
+
+    print(
+        f"[compat] WARNING: tokenizer {tokenizer_name!r} not found in local HF cache; "
+        "loading will try the network. For offline robots set HF_HUB_OFFLINE=1 and "
+        f"pre-download into HF_HOME (current HF_HOME={os.environ.get('HF_HOME', '~/.cache/huggingface')})."
+    )
+    return overrides
+
+
 def import_policy_factory():
     """Import policy factory helpers without loading Groot/transformers on lerobot 0.4.x."""
     _install_groot_config_stub()
     try:
         from lerobot.policies.factory import get_policy_class, make_policy, make_pre_post_processors
 
+        _install_relative_action_processor_stubs()
         return get_policy_class, make_policy, make_pre_post_processors
     except (ImportError, TypeError) as exc:
         msg = str(exc)
@@ -164,4 +308,11 @@ def resolve_inference_device(device: str) -> str:
     return device
 
 
-__all__ = ["import_policy_factory", "load_pretrained_config", "predict_action", "resolve_inference_device"]
+__all__ = [
+    "build_preprocessor_overrides",
+    "import_policy_factory",
+    "load_pretrained_config",
+    "predict_action",
+    "resolve_inference_device",
+    "resolve_local_hf_snapshot",
+]

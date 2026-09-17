@@ -55,25 +55,27 @@ gripper_normalized: false
 # --- camera (pick one mode; urls > devices > serials) ---
 # 逻辑名须与训练 observation.images.<name> 一致；换机只改 = 右侧
 no_camera: false
-show_camera: true
-# 浏览器看实时画面: http://<本机IP>:8765/   截图: /tmp/tb6r5_preview/*.jpg
-# OpenCV/xcb 窗口默认关闭（conda Qt 会卡住）；确需窗口时: export TB6R5_OPENCV_PREVIEW=1
-preview_http_port: 8765
+show_camera: false
 camera_width: 640
 camera_height: 480
 camera_fps: 30
 camera_preview_fps: 15
-camera_serials: "front=262322074140,wrist=347622071274"
+# camera_serials: "front=262322074140,wrist=347622071274"
 # camera_devices: "realsense_0=/dev/video0,realsense_1=/dev/video4"
-# camera_urls: "front=http://192.168.11.11:6888/RsCameraSensor/0/0/color,wrist=http://192.168.11.11:6888/RsCameraSensor/1/0/color"
+camera_urls: "front=http://192.168.11.11:6888/RsCameraSensor/0/0/color,wrist=http://192.168.11.11:6888/RsCameraSensor/1/0/color"
 
 # --- Action space ---
 # joints (default): observation/action = [j0..j5, gripper_mm], JogAnyJ
 # ee_pose: observation/action = [x,y,z,qx,qy,qz,qw,gripper_m], Topic robottarget + JogAnyC
 action_space: ee_pose
 ee_step_max_m: 0.10
+# Cartesian workspace box in meters (robot base / JogAnyC frame). omit / null → no box.
+# Tune to the table; values below cover a typical TB6-R5 pick workspace.
+ee_xyz_min: [0.00, 0.20, 0.10]
+ee_xyz_max: [0.50, 0.80, 0.70]
+ee_limit_mode: abort   # clamp: clip into box and send; abort: skip JogAnyC and stop
 
 # --- ACT optional ---
-n_action_steps: 10
-temporal_ensemble_coeff: 0.01
+n_action_steps: 50
+# temporal_ensemble_coeff: 0.01
 # refresh_policy_every_step: false

@@ -168,6 +168,28 @@ def build_parser() -> argparse.ArgumentParser:
         help="Per-step TCP translation clamp in meters (ee_pose only; <=0 disables)",
     )
     parser.add_argument(
+        "--ee-xyz-min",
+        nargs=3,
+        type=float,
+        default=None,
+        metavar=("X", "Y", "Z"),
+        help="Cartesian workspace min xyz in meters (ee_pose). Omit to disable that bound.",
+    )
+    parser.add_argument(
+        "--ee-xyz-max",
+        nargs=3,
+        type=float,
+        default=None,
+        metavar=("X", "Y", "Z"),
+        help="Cartesian workspace max xyz in meters (ee_pose). Omit to disable that bound.",
+    )
+    parser.add_argument(
+        "--ee-limit-mode",
+        choices=("clamp", "abort"),
+        default="clamp",
+        help="When TCP xyz is outside ee_xyz_min/max: clamp into the box (default) or skip send and stop.",
+    )
+    parser.add_argument(
         "--joint-vel",
         type=float,
         default=DEFAULT_JOG_ANY_JOINT_VEL,

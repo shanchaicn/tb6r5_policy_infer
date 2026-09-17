@@ -21,6 +21,9 @@ _KNOWN_KEYS = frozenset(
         "joint_step_max_rad",
         "action_space",
         "ee_step_max_m",
+        "ee_xyz_min",
+        "ee_xyz_max",
+        "ee_limit_mode",
         "joint_vel",
         "joint_acc",
         "joint_dec",
@@ -120,6 +123,14 @@ def load_yaml_config(path: str | Path) -> dict[str, Any]:
         if len(hj) != 6:
             raise ValueError(f"home_joint_deg must have 6 values, got {len(hj)}")
         out["home_joint_deg"] = [float(x) for x in hj]
+
+    for key in ("ee_xyz_min", "ee_xyz_max"):
+        if key not in out or out[key] is None:
+            continue
+        vals = list(out[key])
+        if len(vals) != 3:
+            raise ValueError(f"{key} must have 3 values [x, y, z], got {len(vals)}")
+        out[key] = [float(x) for x in vals]
 
     return out
 

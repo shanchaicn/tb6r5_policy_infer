@@ -62,6 +62,54 @@ def clamp_ee_step(
     return tgt.astype(np.float32)
 
 
+def parse_xyz_limit(value, *, name: str) -> np.ndarray | None:
+    """Parse YAML/CLI xyz limit: None / empty → disabled; else 3 floats."""
+    if value is None:
+        return None
+    if isinstance(value, (str, bytes)) and not str(value).strip():
+        return None
+    arr = np.asarray(value, dtype=np.float32).ravel()
+    if arr.size == 0:
+        return None
+    if arr.size != 3:
+        raise ValueError(f"{name} must have 3 values [x, y, z], got {arr.size}: {value!r}")
+    if not np.all(np.isfinite(arr)):
+        raise ValueError(f"{name} must be finite, got {arr}")
+    return arr.astype(np.float32)
+
+
+def validate_ee_workspace(xyz_min: np.ndarray | None, xyz_max: np.ndarray | None) -> None:
+    if xyz_min is None or xyz_max is None:
+        return
+    if np.any(xyz_min > xyz_max):
+        raise ValueError(
+            f"ee workspace min must be <= max per axis, got min={xyz_min.tolist()} max={xyz_max.tolist()}"
+        )
+
+
+def clamp_ee_workspace(
+    xyz: np.ndarray,
+    xyz_min: np.ndarray | None,
+    xyz_max: np.ndarray | None,
+) -> tuple[np.ndarray, bool, np.ndarray]:
+    """Clamp TCP xyz into an axis-aligned box.
+
+    Returns ``(clamped_xyz, hit, overflow)`` where ``overflow = raw - clamped``
+    (positive means above max / below min after clamp).
+    """
+    tgt = np.asarray(xyz, dtype=np.float32).ravel()[:3].copy()
+    raw = tgt.copy()
+    if xyz_min is None and xyz_max is None:
+        return tgt, False, np.zeros(3, dtype=np.float32)
+    if xyz_min is not None:
+        tgt = np.maximum(tgt, np.asarray(xyz_min, dtype=np.float32).ravel()[:3])
+    if xyz_max is not None:
+        tgt = np.minimum(tgt, np.asarray(xyz_max, dtype=np.float32).ravel()[:3])
+    overflow = raw - tgt
+    hit = bool(np.any(np.abs(overflow) > 1e-9))
+    return tgt.astype(np.float32), hit, overflow.astype(np.float32)
+
+
 def gripper_m_to_mm(gripper_m: float) -> float:
     return float(gripper_m) * 1000.0
 
