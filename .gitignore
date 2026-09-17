@@ -23,6 +23,7 @@ env/
 
 # Project outputs
 outputs/
+logs/
 *.log
 
 # Secrets

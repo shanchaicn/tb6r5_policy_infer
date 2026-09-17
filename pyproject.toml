@@ -23,6 +23,9 @@ dependencies = [
 
 [project.optional-dependencies]
 hardware = ["pyrealsense2"]
+# FastAPI control plane only (no torch). On Jetson: pip install fastapi uvicorn
+# after `pip install -e ".[hardware,api]" --no-deps` so PyPI torch is not pulled.
+api = ["fastapi>=0.100", "uvicorn>=0.20"]
 
 # torch 不在 dependencies 中：x86 用 pip install torch；Jetson 须装 NVIDIA 预编译 wheel（见 README）。
 # transformers / huggingface-hub 须与 lerobot 0.5.x 配套（见 README）：
@@ -38,6 +41,7 @@ Homepage = "https://github.com/XR-Robotics/XRoboToolkit-Teleop-Sample-Python"
 [project.scripts]
 tb6r5-policy-infer = "tb6r5_policy_infer.cli:cli"
 tb6r5-policy-eval = "tb6r5_policy_infer.eval_cli:cli"
+tb6r5-infer-api = "tb6r5_policy_infer.infer_api:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

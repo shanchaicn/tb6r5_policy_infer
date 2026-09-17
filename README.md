@@ -158,9 +158,36 @@ conda activate /home/ai/condaenv/tb6r5
 pip install -e "./tb6r5_policy_infer[hardware]" --no-deps
 # 若依赖有变再补装；最后确认 CUDA 仍可用
 python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+# HTTP 启停推理（可选）：只补 fastapi/uvicorn，勿再 pip install torch
+pip install "fastapi>=0.100" "uvicorn>=0.20"
 ```
 
 模型权重（`pretrained_model/`）需单独 `rsync`，不在 git 里。
+
+### HTTP 推理控制面（`tb6r5-infer-api`）
+
+不 import lerobot/torch，只在本环境拉起 `tb6r5-policy-infer --config configs/act.yaml`。Jetson 上 **不要** `pip install -e ".[api]"` 而不加 `--no-deps`（会误装 PyPI torch）。
+
+```bash
+conda activate /home/ai/condaenv/tb6r5
+cd <仓库根>
+pip install -e ".[hardware,api]" --no-deps
+pip install "fastapi>=0.100" "uvicorn>=0.20"
+python -c "import torch; print(torch.__version__, torch.cuda.is_available())"  # 须仍为 True
+
+tb6r5-infer-api --host 0.0.0.0 --port 8005
+# 或: python infer_api.py --port 8005
+```
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| POST | `/inference/start` | 启动推理（已在跑则 409） |
+| POST | `/inference/stop` | SIGINT 停进程 |
+| GET | `/inference/status` | pid / returncode |
+| GET | `/inference/logs?lines=200` | 尾部日志 |
+| GET | `/health` | 探活 |
+
+环境变量：`TB6R5_INFER_COMMAND`、`TB6R5_INFER_CONFIG`（默认 `configs/act.yaml`）、`TB6R5_INFER_LOG`。
 
 ---
 
@@ -741,6 +768,7 @@ pip install "transformers>=4.57.1,<5.0.0" "huggingface-hub>=0.34.2,<0.36.0"
 | `hardware/`      | 内置 TB6-R5 RPC/Topic（`tb6r5.py`）与 RealSense（不依赖 `xrobotoolkit_teleop`） |
 | `vendor/` / `vendor_py312/` | 厂商 `rpc.so` / `topic.so`（按 Python 3.10 / 3.12 选用） |
 | `lerobot_compat` | LeRobot 版本兼容与 config 加载                                      |
+| `infer_api`      | HTTP 启停 `tb6r5-policy-infer`（入口 `tb6r5-infer-api`，不依赖 torch） |
 
 
 真机部署只需更新本推理包；SDK 已内置在 `tb6r5_policy_infer/vendor*`（也可用 `TB6R5_DEPS_ROOT` 覆盖）。
