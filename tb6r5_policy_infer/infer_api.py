@@ -1,4 +1,4 @@
-"""HTTP API for starting/stopping ``tb6r5-policy-infer`` (LeRobot env compatible).
+"""HTTP/WebSocket API for controlling ``tb6r5-policy-infer``.
 
 Does not import lerobot/torch. The subprocess uses the same conda env's
 ``tb6r5-policy-infer`` entry point.
@@ -13,6 +13,8 @@ Run::
 from __future__ import annotations
 
 import argparse
+import asyncio
+import json
 import os
 import shlex
 import shutil
@@ -26,7 +28,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator, TextIO
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import PlainTextResponse
 
 
@@ -229,7 +231,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(
     title="TB6-R5 Policy Inference API",
-    version="1.0.0",
+    version="1.1.0",
     lifespan=lifespan,
 )
 
@@ -270,6 +272,133 @@ def inference_logs(
     lines: int = Query(default=200, ge=1, le=5000, description="Number of trailing lines"),
 ) -> str:
     return _tail_lines(LOG_FILE, lines)
+
+
+def _websocket_response(
+    action: str,
+    request_id: Any,
+    *,
+    data: Any = None,
+    error: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    message: dict[str, Any] = {
+        "type": "response",
+        "action": action,
+        "ok": error is None,
+    }
+    if request_id is not None:
+        message["request_id"] = request_id
+    if error is None:
+        message["data"] = data
+    else:
+        message["error"] = error
+    return message
+
+
+async def _dispatch_websocket_message(message: Any) -> dict[str, Any]:
+    if not isinstance(message, dict):
+        return _websocket_response(
+            "",
+            None,
+            error={"status_code": 400, "detail": "Message must be a JSON object"},
+        )
+
+    action_value = message.get("action")
+    action = action_value.strip().lower() if isinstance(action_value, str) else ""
+    request_id = message.get("request_id")
+    if not action:
+        return _websocket_response(
+            "",
+            request_id,
+            error={"status_code": 400, "detail": "Missing or invalid action"},
+        )
+
+    try:
+        if action == "start":
+            data = await asyncio.to_thread(start_inference)
+        elif action == "stop":
+            # stop_inference may wait while escalating SIGINT to SIGTERM/SIGKILL;
+            # keep that blocking work away from the ASGI event loop.
+            data = await asyncio.to_thread(stop_inference)
+        elif action == "status":
+            with _lock:
+                data = _status_locked()
+        elif action == "logs":
+            lines = message.get("lines", 200)
+            if isinstance(lines, bool) or not isinstance(lines, int) or not 1 <= lines <= 5000:
+                return _websocket_response(
+                    action,
+                    request_id,
+                    error={"status_code": 422, "detail": "lines must be an integer from 1 to 5000"},
+                )
+            data = {"lines": lines, "content": _tail_lines(LOG_FILE, lines)}
+        elif action == "ping":
+            data = {"timestamp": _utc_now()}
+        else:
+            return _websocket_response(
+                action,
+                request_id,
+                error={"status_code": 400, "detail": f"Unsupported action: {action}"},
+            )
+        return _websocket_response(action, request_id, data=data)
+    except HTTPException as exc:
+        return _websocket_response(
+            action,
+            request_id,
+            error={"status_code": exc.status_code, "detail": exc.detail},
+        )
+    except Exception as exc:
+        return _websocket_response(
+            action,
+            request_id,
+            error={"status_code": 500, "detail": str(exc)},
+        )
+
+
+@app.websocket("/api/act/inference/ws")
+@app.websocket("/ws/inference")
+@app.websocket("/inference/ws")
+async def inference_websocket(websocket: WebSocket) -> None:
+    """Bidirectional inference control with status-change notifications."""
+    await websocket.accept()
+
+    with _lock:
+        last_status = _status_locked()
+    await websocket.send_json({"type": "event", "event": "status", "data": last_status})
+
+    try:
+        while True:
+            try:
+                message = await asyncio.wait_for(websocket.receive_json(), timeout=1.0)
+            except asyncio.TimeoutError:
+                with _lock:
+                    current_status = _status_locked()
+                if current_status != last_status:
+                    await websocket.send_json(
+                        {"type": "event", "event": "status", "data": current_status}
+                    )
+                    last_status = current_status
+                continue
+            except (json.JSONDecodeError, ValueError):
+                await websocket.send_json(
+                    _websocket_response(
+                        "",
+                        None,
+                        error={"status_code": 400, "detail": "Invalid JSON message"},
+                    )
+                )
+                continue
+
+            response = await _dispatch_websocket_message(message)
+            await websocket.send_json(response)
+
+            # A start/stop request normally changes status immediately. Record
+            # the new snapshot so the next unsolicited event represents a later
+            # transition (for example, the child process exiting by itself).
+            with _lock:
+                last_status = _status_locked()
+    except WebSocketDisconnect:
+        return
 
 
 def main() -> None:

@@ -95,7 +95,7 @@ cd /home/ai/pi0.5/chaishan   # 仓库根；按实际路径调整
 python -m pip install -e "./tb6r5_policy_infer[hardware]" --no-deps
 
 # 再补依赖。lerobot 会拉 torchvision 等；装完若 torch 变 CPU 版，立刻用上面的 wheel 盖回去
-python -m pip install "lerobot==0.5.1" "transformers>=5.3.0,<6.0.0" "huggingface-hub>=1.16.0,<2.0.0" \
+python -m pip install "lerobot==0.6.1" "transformers>=5.4.0,<5.6.0" "huggingface-hub>=1.16.0,<2.0.0" \
   opencv-python matplotlib
 
 # 若 torch 被换成 2.10.0+cpu / cuda=False，重新装回 Jetson wheel：
@@ -106,7 +106,8 @@ pip install --force-reinstall --no-deps \
   torchaudio-2.10.0-cp310-cp310-linux_aarch64.whl
 ```
 
-> **说明：** `lerobot 0.5.1` 与 Jetson 专用 torch 2.11 可能有 pip 版本警告，可忽略；以 `torch.cuda.is_available()` 为准。  
+> **说明：** Jetson 上当前维护的环境是 `dockerfile_yaml` 里的镜像 `lerobot:0.6.1-jetson-jp62`（NVIDIA PyTorch 25.06，`lerobot` 用 `--no-deps` 安装，另外装 `transformers>=5.4,<5.6`）。pi0.5 权重若在 0.6.1 上训练，必须用这个组合；0.5.1 / 0.4.4 会把语言 embedding 再乘一次 `sqrt(hidden_dim)`，动作是错的。  
+> `lerobot 0.6.1` 与 Jetson 专用 torch 2.8/2.11 可能有 pip 版本警告，可忽略；以 `torch.cuda.is_available()` 为准，并确认 torch 没有被换成 PyPI CPU 版。  
 > 若直接 `pip install -e "...[hardware]"`（不带 `--no-deps`），同样可能把 torch 覆盖成 PyPI CPU 版，装完务必验证 CUDA。
 
 ##### 3）自检
@@ -144,7 +145,7 @@ tb6r5-policy-infer --robot-ip 192.168.11.11 --policy-path model/... \
 cd <仓库根>
 conda activate tb6r5   # 或你的环境名
 
-pip install "lerobot==0.5.1" "transformers>=5.3.0,<6.0.0" "huggingface-hub>=1.16.0,<2.0.0"
+pip install "lerobot==0.6.1" "transformers>=5.4.0,<5.6.0" "huggingface-hub>=1.16.0,<2.0.0"
 pip install -e "./tb6r5_policy_infer[hardware]"
 pip install torch   # x86：用官方 CUDA wheel；勿在 Jetson 上执行本行
 ```
@@ -158,13 +159,13 @@ conda activate /home/ai/condaenv/tb6r5
 pip install -e "./tb6r5_policy_infer[hardware]" --no-deps
 # 若依赖有变再补装；最后确认 CUDA 仍可用
 python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
-# HTTP 启停推理（可选）：只补 fastapi/uvicorn，勿再 pip install torch
-pip install "fastapi>=0.100" "uvicorn>=0.20"
+# HTTP/WebSocket 启停推理（可选），勿再 pip install torch
+pip install "fastapi>=0.100" "uvicorn>=0.20" "websockets>=11"
 ```
 
 模型权重（`pretrained_model/`）需单独 `rsync`，不在 git 里。
 
-### HTTP 推理控制面（`tb6r5-infer-api`）
+### HTTP/WebSocket 推理控制面（`tb6r5-infer-api`）
 
 不 import lerobot/torch，只在本环境拉起 `tb6r5-policy-infer --config configs/act.yaml`。Jetson 上 **不要** `pip install -e ".[api]"` 而不加 `--no-deps`（会误装 PyPI torch）。
 
@@ -172,7 +173,7 @@ pip install "fastapi>=0.100" "uvicorn>=0.20"
 conda activate /home/ai/condaenv/tb6r5
 cd <仓库根>
 pip install -e ".[hardware,api]" --no-deps
-pip install "fastapi>=0.100" "uvicorn>=0.20"
+pip install "fastapi>=0.100" "uvicorn>=0.20" "websockets>=11"
 python -c "import torch; print(torch.__version__, torch.cuda.is_available())"  # 须仍为 True
 
 tb6r5-infer-api --host 0.0.0.0 --port 8005
@@ -186,6 +187,42 @@ tb6r5-infer-api --host 0.0.0.0 --port 8005
 | GET | `/inference/status` | pid / returncode |
 | GET | `/inference/logs?lines=200` | 尾部日志 |
 | GET | `/health` | 探活 |
+
+WebSocket 主地址：
+
+```text
+ws://<host>:8005/inference/ws
+```
+
+连接成功后服务端立即发送一次状态事件；推理进程状态后续发生变化时也会主动推送：
+
+```json
+{"type":"event","event":"status","data":{"status":"idle","running":false}}
+```
+
+客户端通过 JSON 消息控制推理，`request_id` 可选，服务端会原样带回：
+
+```json
+{"action":"start","request_id":"1"}
+{"action":"status","request_id":"2"}
+{"action":"logs","lines":200,"request_id":"3"}
+{"action":"stop","request_id":"4"}
+{"action":"ping","request_id":"5"}
+```
+
+成功响应：
+
+```json
+{"type":"response","action":"status","ok":true,"request_id":"2","data":{"status":"running","running":true,"pid":1234}}
+```
+
+失败响应不会断开 WebSocket：
+
+```json
+{"type":"response","action":"start","ok":false,"request_id":"1","error":{"status_code":409,"detail":"Inference is already running"}}
+```
+
+兼容地址 `/ws/inference`、`/api/act/inference/ws` 也可使用。原有 HTTP 接口继续保留，现有行为树插件无需修改。
 
 环境变量：`TB6R5_INFER_COMMAND`、`TB6R5_INFER_CONFIG`（默认 `configs/act.yaml`）、`TB6R5_INFER_LOG`。
 
@@ -695,22 +732,33 @@ tb6r5-policy-eval \
 
 ## 依赖版本
 
-本包当前固定 **lerobot 0.5.1**（见 `pyproject.toml`）。SmolVLA / pi0 等策略依赖 `transformers` / `huggingface-hub`，版本须配套。
+本包当前固定 **lerobot 0.6.1**（见 `pyproject.toml`）。pi0 / pi0.5 在这个版本里依赖 `transformers>=5.4,<5.6`（PaliGemma embedding 缩放）和 `huggingface-hub`。
 
-### lerobot 0.5.1（当前默认）
+Jetson 上用 `dockerfile_yaml` 构建的镜像 `lerobot:0.6.1-jetson-jp62`。镜像保留 NVIDIA PyTorch 2.8，`lerobot` 以 `--no-deps` 安装，并单独装 `transformers` / `sentencepiece`。不要在该镜像里 `pip install lerobot`（不带 `--no-deps`），否则会把 torch 换成 PyPI 版。
+
+### lerobot 0.6.1（当前默认）
+
+```bash
+pip install "lerobot==0.6.1" "transformers>=5.4.0,<5.6.0" "huggingface-hub>=1.16.0,<2.0.0"
+pip install -e ./tb6r5_policy_infer --no-deps
+```
+
+**Jetson / TER30**：优先用 Docker 镜像。若在 conda 里装，必须先装 Jetson 专用 torch wheel，再装 lerobot；`pyproject.toml` 不含 `torch`，避免 pip 误装 PyPI 版。详见上文「Jetson / TER30」安装流程。
+
+若环境里已有 `huggingface-hub>=1.0` 但 `transformers<5.4`，pi0.5 的语言条件会和 0.6.1 训练不一致；升级 transformers 即可：
+
+```bash
+pip install "transformers>=5.4.0,<5.6.0"
+```
+
+### lerobot 0.5.1（旧版，不能用来推理 0.6.1 训出的 pi0.5）
 
 ```bash
 pip install "lerobot==0.5.1" "transformers>=5.3.0,<6.0.0" "huggingface-hub>=1.16.0,<2.0.0"
 pip install -e ./tb6r5_policy_infer --no-deps
 ```
 
-**Jetson / TER30**：必须先装 Jetson 专用 torch wheel，再装 lerobot；`pyproject.toml` 不含 `torch`，避免 pip 误装 PyPI 版。详见上文「Jetson / TER30」安装流程。
-
-若环境里已有 `huggingface-hub>=1.0` 但 `transformers<5`，导入时会报版本冲突；升级 transformers 即可：
-
-```bash
-pip install "transformers>=5.3.0,<6.0.0"
-```
+0.5.1 的 pi0.5 前向会把语言 embedding 再乘 `sqrt(hidden_dim)`。0.6.1 训练的 checkpoint 不能用这个环境推理。
 
 ### lerobot 0.4.4（旧版，可选回退）
 
@@ -734,7 +782,13 @@ DecodingError: The fields `use_peft` are not valid for ACTConfig
 ImportError: huggingface-hub>=0.34.0,<1.0 is required ... but found huggingface-hub==1.22.0
 ```
 
-**0.5 环境修复（当前默认）：**
+**0.6.1 环境修复（当前默认）：**
+
+```bash
+pip install "transformers>=5.4.0,<5.6.0" "huggingface-hub>=1.16.0,<2.0.0"
+```
+
+**0.5.1 环境修复：**
 
 ```bash
 pip install "transformers>=5.3.0,<6.0.0" "huggingface-hub>=1.16.0,<2.0.0"

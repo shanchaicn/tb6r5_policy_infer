@@ -65,8 +65,8 @@ def _install_groot_config_stub() -> None:
 def _transformers_hub_mismatch_help() -> str | None:
     return (
         "transformers and huggingface-hub versions are incompatible.\n"
-        "This project uses lerobot 0.5.x (SmolVLA / pi0 need transformers). Run:\n"
-        '  pip install "transformers>=5.3.0,<6.0.0" "huggingface-hub>=1.16.0,<2.0.0"\n'
+        "This project uses lerobot 0.6.1 (SmolVLA / pi0 / pi05 need transformers 5.4–5.5). Run:\n"
+        '  pip install "transformers>=5.4.0,<5.6.0" "huggingface-hub>=1.16.0,<2.0.0"\n'
         "If you must stay on lerobot 0.4.x instead, pin the older pair:\n"
         '  pip install "lerobot==0.4.4" "transformers>=4.57.1,<5.0.0" '
         '"huggingface-hub>=0.34.2,<0.36.0"'
@@ -200,6 +200,21 @@ def _install_relative_action_processor_stubs() -> None:
                 return {"enabled": self.enabled}
 
 
+def _local_tokenizer_snapshot(repo_id: str) -> str | None:
+    """Return a cached snapshot that has tokenizer files, even if model weights are absent."""
+    try:
+        from huggingface_hub.constants import HF_HUB_CACHE
+    except ImportError:
+        return None
+    snapshots = Path(HF_HUB_CACHE) / ("models--" + repo_id.replace("/", "--")) / "snapshots"
+    if not snapshots.is_dir():
+        return None
+    for snap in sorted(snapshots.iterdir()):
+        if (snap / "tokenizer.json").is_file() or (snap / "tokenizer.model").is_file():
+            return str(snap)
+    return None
+
+
 def resolve_local_hf_snapshot(repo_id: str) -> str | None:
     """Return a local HF hub snapshot path for ``repo_id`` if fully cached, else None."""
     if not repo_id or repo_id.startswith(("/", ".", "~")):
@@ -209,7 +224,7 @@ def resolve_local_hf_snapshot(repo_id: str) -> str | None:
 
         return snapshot_download(repo_id=repo_id, local_files_only=True)
     except Exception:
-        return None
+        return _local_tokenizer_snapshot(repo_id)
 
 
 def read_processor_tokenizer_name(policy_path: str | Path) -> str | None:
@@ -271,14 +286,14 @@ def import_policy_factory():
                 "or align versions together:\n"
                 '  pip install "transformers>=4.57.1,<5.0.0" "huggingface-hub>=0.34.2,<0.36.0"\n'
                 "or upgrade the full stack:\n"
-                '  pip install "lerobot>=0.5.1" "transformers>=5.3.0" "huggingface-hub>=1.16.0,<2.0.0"'
+                '  pip install "lerobot==0.6.1" "transformers>=5.4.0,<5.6.0" "huggingface-hub>=1.16.0,<2.0.0"'
             ) from exc
         if "backbone_cfg" in msg or "non-default argument" in msg:
             raise ImportError(
                 "lerobot Groot policy failed to import (transformers dataclass conflict).\n"
                 "ACT eval does not need Groot. Sync latest tb6r5_policy_infer, or run:\n"
                 "  pip uninstall transformers -y\n"
-                'or upgrade: pip install "lerobot>=0.5.1" "transformers>=5.3.0" '
+                'or upgrade: pip install "lerobot==0.6.1" "transformers>=5.4.0,<5.6.0" '
                 '"huggingface-hub>=1.16.0,<2.0.0"'
             ) from exc
         raise

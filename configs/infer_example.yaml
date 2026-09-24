@@ -7,14 +7,14 @@
 # Convenience: home_on_start: true/false  ↔  --no-home-on-start inverted
 
 # --- required ---
-robot_ip: "192.168.11.11"
-policy_path: "/home/ai/pi0.5/model/008000/pretrained_model/"
+robot_ip: "192.168.2.183"
+policy_path: "/home/ai/pi0.5/model/pi05_0902_fft_10k/010000/pretrained_model/"
 # policy_path: "model/act/080000/pretrained_model"
 
 # --- device / policy ---
 device: cuda          # auto | cuda | cpu
 policy_type: pi05     # auto | act | diffusion | smolvla | pi0 | pi05 | pi0_fast
-task: "Pick up the purple ring and place it on the white plate."  # required for VLA
+  #task: "Pick up the purple ring and place it on the white plate."  # required for VLA
 fps: null               # omit / null → per-policy default; set a number to override
 # arm_rpc_rate_hz: null   # omit / null → policy default (≈ fps for ACT)
 # gripper_rpc_rate_hz: null  # omit / null → 2 Hz (or = arm when g_model=3)
@@ -61,7 +61,7 @@ camera_fps: 30
 camera_preview_fps: 15
 # camera_serials: "realsense_0=135522071053,realsense_1=244222075136"
 # camera_devices: "realsense_0=/dev/video0,realsense_1=/dev/video4"
-camera_urls: "front=http://192.168.11.11:6888/RsCameraSensor/0/0/color,wrist=http://192.168.11.11:6888/RsCameraSensor/1/0/color"
+camera_urls: "front=http://192.168.2.183:6888/RsCameraSensor/0/0/color,wrist=http://192.168.2.183:6888/RsCameraSensor/1/0/color"
 
 # --- Action space ---
 # joints (default): observation/action = [j0..j5, gripper_mm], JogAnyJ
@@ -71,9 +71,9 @@ ee_step_max_m: 0.03
 # Cartesian workspace box in meters (robot base / JogAnyC frame). omit / null → no box.
 ee_xyz_min: [0.00, 0.20, 0.10]
 ee_xyz_max: [0.50, 0.80, 0.70]
-ee_limit_mode: abort   # clamp: clip into box and send; abort: skip JogAnyC and stop
+ee_limit_mode: null   # clamp: clip into box and send; abort: skip JogAnyC and stop
 
 # --- ACT optional ---
 # n_action_steps: 10
 # temporal_ensemble_coeff: 0.01
-# refresh_policy_every_step: false
+#： refresh_policy_every_step: false
